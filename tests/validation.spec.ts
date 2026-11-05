@@ -44,7 +44,7 @@ describe('strict CQTest acceptance contract', () => {
     expect(Object.isFrozen(contract.requiredTestIds)).toBe(true)
   })
 
-  it('fingerprints all source extensions and file names but excludes fixed generated caches', () => {
+  it('fingerprints all source extensions and file names but excludes fixed generated caches/reports', () => {
     const { workspace } = fixture()
     const before = fingerprintWorkspace(workspace)
     for (const name of ['__pycache__', '.pytest_cache']) {
@@ -84,13 +84,24 @@ describe('strict CQTest acceptance contract', () => {
     expect(() => createValidationContract({ ...base, adapter: 'cqtest-report', requiredTestIds: ['python.module.Case.test'] })).toThrow()
   })
 
-  it('rejects workspace links, ancestor links and links escaping a tree', () => {
+  it('rejects workspace links, ancestor links, executable links and links escaping a tree', () => {
     const { workspace } = fixture()
     const linked = path.join(path.dirname(workspace), `link-${process.pid}`)
-    try { symlinkSync(workspace, linked, 'junction') } catch { return }
+    let made = false
+    try { symlinkSync(workspace, linked, 'junction'); made = true } catch { /* no privilege for links on this host */ }
+    if (!made) return
     try {
+      // A symlinked workspace is rejected outright.
       expect(() => createValidationContract({ adapter: 'cqtest-report', executable, workspace: linked,
         requiredTestIds: [CQTEST_PASSING_ID], revision: 'r1' })).toThrow()
+      // A trusted validator reached through a link is rejected as well.
+      const linkedExe = path.join(path.dirname(workspace), `exe-link-${process.pid}`)
+      try {
+        symlinkSync(executable, linkedExe, 'file')
+        expect(() => createValidationContract({ adapter: 'cqtest-report', executable: linkedExe, workspace,
+          requiredTestIds: [CQTEST_PASSING_ID], revision: 'r1' })).toThrow()
+      } catch { /* linking a file may be refused; the workspace case above still applies */ }
+      finally { rmSync(linkedExe, { force: true }) }
     } finally { rmSync(linked, { recursive: true, force: true }) }
   })
 

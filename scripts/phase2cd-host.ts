@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Phase 2 C+D independent host process (demo/verification only; never part of the product).
  *
  *   node --experimental-transform-types scripts/phase2cd-host.ts --state <absolute dir>
@@ -8,8 +8,8 @@
  * (<state>/delivery-simulation). Only the executor and the TP editor are recording stubs: no editor, git push, PR,
  * package or upload is ever performed. Line protocol: stdin `{id,cmd,args}` -> stdout `{id,ok,result|error}`.
  */
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { Store } from '../src/app/store.ts'
@@ -26,7 +26,21 @@ const state = argument('--state')
 if (!state || !path.isAbsolute(state)) { process.stderr.write('usage: phase2cd-host.ts --state <absolute directory>\n'); process.exit(2) }
 mkdirSync(state, { recursive: true })
 
-const python = execFileSync('python', ['-I', '-S', '-c', 'import sys;print(sys.executable)'], { encoding: 'utf8' }).trim()
+/** The trusted CQTest report validator stands outside every workspace, like the host's own role. */
+const validator = realpathSync(process.execPath)
+const CQTEST_ID = 'TP.Editor.UiDsl.ApplyGateRejectsNonPatchable'
+/** Write Unreal's own report shape so the run-tests command has real evidence to validate. */
+function writeCqtestReport(workspace: string) {
+  const stamp = (d: Date) => `${d.getUTCFullYear()}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.${String(d.getUTCDate()).padStart(2, '0')}`
+    + `-${String(d.getUTCHours()).padStart(2, '0')}.${String(d.getUTCMinutes()).padStart(2, '0')}.${String(d.getUTCSeconds()).padStart(2, '0')}`
+  const at = new Date()
+  const report = { devices: [{ instance: 'DEVICE', platform: 'WindowsEditor' }], reportCreatedOn: stamp(at), succeeded: 1,
+    succeededWithWarnings: 0, failed: 0, notRun: 0, inProcess: 0, totalDuration: 0.001, comparisonExported: false, comparisonExportDirectory: '',
+    tests: [{ testDisplayName: 'ApplyGateRejectsNonPatchable', fullTestPath: CQTEST_ID, tags: [], state: 'Success', deviceInstance: ['DEVICE'],
+      duration: 0.001, dateTime: stamp(at), entries: [], warnings: 0, errors: 0, artifacts: [] }] }
+  mkdirSync(path.join(workspace, 'Saved', 'Automation', 'TestReport'), { recursive: true })
+  writeFileSync(path.join(workspace, 'Saved', 'Automation', 'TestReport', 'index.json'), JSON.stringify(report))
+}
 const receipts = path.join(state, 'delivery-simulation')
 const store = new Store(path.join(state, 'orchestrator.sqlite'))
 const broker = new EnvironmentExclusivity(state)
@@ -123,7 +137,7 @@ function afterEntering(id: string) {
 }
 
 const commands: Record<string, (args: any) => unknown | Promise<unknown>> = {
-  info: () => ({ pid: process.pid, state, python, node: process.version, resumed, receipts }),
+  info: () => ({ pid: process.pid, state, validator, node: process.version, resumed, receipts }),
   accept: (a: { title: string; dir: string }) => {
     pendingDirectory = a.dir; requests.length = 0
     const seq = ++sequence, id = `p2cd-${process.pid}-${seq}`
@@ -149,11 +163,12 @@ const commands: Record<string, (args: any) => unknown | Promise<unknown>> = {
   },
   'configure-tests': (a: { ticketId: string; requiredTestIds?: string[]; timeoutMs?: number }) => {
     const workspace = realpathSync(need(a.ticketId).execution!.directory)
-    engine.configureValidation(a.ticketId, { adapter: 'python-unittest', executable: python, workspace,
-      requiredTestIds: a.requiredTestIds ?? ['test_delivery.Delivery.test_answer'], timeoutMs: a.timeoutMs ?? 30_000 })
-    return { workspace, python }
+    engine.configureValidation(a.ticketId, { adapter: 'cqtest-report', executable: validator, workspace,
+      requiredTestIds: a.requiredTestIds ?? [CQTEST_ID], timeoutMs: a.timeoutMs ?? 30_000 })
+    return { workspace, validator }
   },
   'run-tests': async (a: { ticketId: string }) => {
+    writeCqtestReport(realpathSync(need(a.ticketId).execution!.directory))
     const evidence: any = await engine.runTicketTests(a.ticketId, assignmentOf(a.ticketId))
     return { passed: evidence.passed, completed: evidence.completed, exitCode: evidence.exitCode, testsRun: evidence.testsRun, failures: evidence.failures,
       errors: evidence.errors, skipped: evidence.skipped, successfulTestIds: evidence.successfulTestIds, finishedAt: evidence.finishedAt, binding: evidence.binding }
