@@ -230,7 +230,7 @@ function routes(runtime: HttpHost): Routes {
     'GET tickets/:id/validation': ({ params }) => ({ validation: store.tickets.get(ticket(params.id))!.validation ?? null }),
     'PUT tickets/:id/validation': async ({ params, body }) => {
       const input = z.object({ enabled: z.literal(true), contract: z.object({
-        adapter: z.enum(['python-unittest', 'node-test', 'cqtest-report']), executable: z.string().min(1), workspace: z.string().min(1),
+        adapter: z.literal('cqtest-report'), executable: z.string().min(1), workspace: z.string().min(1),
         requiredTestIds: z.array(z.string().min(1)).min(1), timeoutMs: z.number().int().positive().max(600_000).optional(),
       }).strict().optional() }).strict().parse(await body())
       const updated = runtime.engine.configureValidation(ticket(params.id), input.contract)

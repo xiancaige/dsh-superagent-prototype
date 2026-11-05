@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,9 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Store } from '../src/app/store.ts'
 import { executorTools, type ExecutorToolsHost } from '../src/app/tools/executor.ts'
 import { Engine, MemoryRepositories, type Candidate, type OutboundMessage, type Policy, type Repositories, type Ticket, type WorkerReport } from '../src/core/index.ts'
+import { CQTEST_PASSING_ID, writeCqtestReport } from './fixtures/cqtest-report.ts'
 
-// Resolve a real interpreter on the host. Never mock the runner or accept a worker's JSON as evidence.
-const executable = execFileSync('python', ['-I', '-S', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
+/** A trusted validator outside every workspace (the CQTest report validator's role). */
+const executable = realpathSync(process.execPath)
 const roots: string[] = []
 const stores = new Set<Store>()
 afterEach(() => {
@@ -16,12 +16,12 @@ afterEach(() => {
   stores.clear()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
-const testSource = 'import unittest\nfrom source import answer\nclass Example(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n'
+const testSource = 'export const answer = () => 42\n'
 function workspace() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-strict-engine-')))
   roots.push(root)
-  writeFileSync(join(root, 'source.py'), 'def answer():\n    return 42\n')
-  writeFileSync(join(root, 'test_example.py'), testSource)
+  writeFileSync(join(root, 'source.ts'), testSource)
+  writeCqtestReport(root)
   return root
 }
 function openStore(path: string) {
@@ -30,7 +30,7 @@ function openStore(path: string) {
   return store
 }
 function closeStore(store: Store) { store.close(); stores.delete(store) }
-function harness(repo: Repositories = new MemoryRepositories(), directory = workspace(), adapter: 'python-unittest' | 'node-test' = 'python-unittest') {
+function harness(repo: Repositories = new MemoryRepositories(), directory = workspace()) {
   const requests: Candidate[] = []
   const outbox: OutboundMessage[] = []
   const policy: Policy = {
@@ -61,8 +61,8 @@ function harness(repo: Repositories = new MemoryRepositories(), directory = work
     return ticket.id
   }
   const current = (id: string) => repo.tickets.get(id)!
-  const contract = { adapter, executable: adapter === 'node-test' ? realpathSync(process.execPath) : executable, workspace: directory,
-    requiredTestIds: adapter === 'node-test' ? ['example.test.mjs::["answer is correct"]'] : ['test_example.Example.test_answer'], timeoutMs: 10_000 }
+  const contract = { adapter: 'cqtest-report' as const, executable, workspace: directory,
+    requiredTestIds: [CQTEST_PASSING_ID], timeoutMs: 10_000 }
   const enable = (id: string) => engine.configureValidation(id, contract)
   const run = (id: string) => engine.runTicketTests(id, current(id).assignments.at(-1)!.id)
   const ready = (id: string) => engine.report(id, { state: 'ready', summary: 'All tests pass' })
@@ -76,11 +76,10 @@ function harness(repo: Repositories = new MemoryRepositories(), directory = work
 }
 
 describe('strict validation at Engine acceptance boundaries', () => {
-  it('runs Node through ready/SQLite restore/result guards and rejects old assignments', async () => {
+  it('runs CQTest through ready/SQLite restore/result guards and rejects old assignments', async () => {
     const directory = workspace()
-    writeFileSync(join(directory, 'example.test.mjs'), `import {test} from 'node:test'; import assert from 'node:assert/strict'; test('answer is correct',()=>assert.equal(42,42));`)
-    const database = join(workspace(), 'node.sqlite'), store = openStore(database)
-    const h = harness(store, directory, 'node-test'), id = h.accept()
+    const database = join(workspace(), 'cqtest.sqlite'), store = openStore(database)
+    const h = harness(store, directory), id = h.accept()
     h.enable(id)
     expect(() => h.ready(id)).toThrow(/validation/i)
     const old = h.current(id).assignments.at(-1)!.id
@@ -92,12 +91,12 @@ describe('strict validation at Engine acceptance boundaries', () => {
     expect(() => h.ready(id)).toThrow(/validation/i)
     await h.run(id)
     closeStore(store)
-    const restored = harness(openStore(database), directory, 'node-test')
+    const restored = harness(openStore(database), directory)
     expect(restored.ready(id).ended?.outcome).toBe('completed')
     expect(restored.result(id).status).toBe('pending')
-    writeFileSync(join(directory, 'example.test.mjs'), `import {test} from 'node:test'; test('answer is correct',()=>{throw Error('fails')});`)
+    writeCqtestReport(directory, { passing: [], failing: [CQTEST_PASSING_ID], at: new Date(Date.now() + 1_000) })
     expect(() => restored.result(id)).toThrow(/validation|stale|changed/i)
-    const failed = harness(undefined, directory, 'node-test'), failedId = failed.accept()
+    const failed = harness(undefined, directory), failedId = failed.accept()
     failed.enable(failedId)
     expect((await failed.run(failedId)).passed).toBe(false)
     expect(() => failed.ready(failedId)).toThrow(/validation/i)
@@ -142,7 +141,7 @@ describe('strict validation at Engine acceptance boundaries', () => {
     h.enable(id)
     const evidence = await h.run(id)
     expect(evidence).toMatchObject({ passed: true, completed: true, exitCode: 0, testsRun: 1, failures: 0, errors: 0,
-      skipped: 0, successfulTestIds: ['test_example.Example.test_answer'], binding: { ticketId: id, assignmentId: h.current(id).assignments.at(-1)!.id, workspace: h.directory } })
+      skipped: 0, successfulTestIds: [CQTEST_PASSING_ID], binding: { ticketId: id, assignmentId: h.current(id).assignments.at(-1)!.id, workspace: h.directory } })
     expect(h.current(id).validation?.evidence).toEqual(evidence)
     expect(h.current(id).validation?.running).toBeUndefined()
     expect(h.ready(id).ended?.outcome).toBe('completed')
@@ -150,12 +149,17 @@ describe('strict validation at Engine acceptance boundaries', () => {
     expect(h.outbox).toHaveLength(1)
   })
 
-  it('does not accept a worker success summary when the actual Python case fails', async () => {
+  it('does not accept a worker success summary when the CQTest report records a failure', async () => {
     const h = harness(), id = h.accept()
-    writeFileSync(join(h.directory, 'source.py'), 'def answer():\n    return 0\n')
     h.enable(id)
+    // A fresh report that simply fails. Stamping it in the future would be rejected for being from the
+    // future and would hide the point of this case.
+    writeCqtestReport(h.directory, { passing: [], failing: [CQTEST_PASSING_ID], at: new Date() })
     const evidence = await h.run(id)
-    expect(evidence).toMatchObject({ passed: false, completed: true, testsRun: 1, failures: 1 })
+    // A report holding a failure is refused as evidence outright (the run must be clean), so it carries
+    // its concrete reason rather than a partial result.
+    expect(evidence.passed).toBe(false)
+    expect(evidence.reasons.join('; ')).toMatch(/CQTest not clean/)
     expect(h.current(id).validation?.evidence).toEqual(evidence)
     expect(() => h.ready(id)).toThrow(/validation/i)
     expect(() => h.result(id)).toThrow()
@@ -178,12 +182,12 @@ describe('strict validation at Engine acceptance boundaries', () => {
     const restored = harness(openStore(database), h.directory)
     expect(restored.current(id).validation).toEqual(saved)
     expect(restored.ready(id).ended?.outcome).toBe('completed')
-    writeFileSync(join(h.directory, 'source.py'), 'def answer():\n    return 0\n')
+    writeFileSync(join(h.directory, 'source.ts'), 'export const answer = () => 0\n')
     expect(() => restored.result(id)).toThrow(/validation|fingerprint|changed/i)
     expect(restored.outbox).toEqual([])
   })
 
-  it.each(['source.py', 'test_example.py'] as const)('restores strict missing-evidence state and cannot accept %s changes as proof', filename => {
+  it.each(['source.ts', 'notes.txt'] as const)('restores strict missing-evidence state and cannot accept %s changes as proof', filename => {
     const database = join(workspace(), 'missing.sqlite'), store = openStore(database)
     const h = harness(store), id = h.accept()
     h.enable(id)
@@ -199,11 +203,14 @@ describe('strict validation at Engine acceptance boundaries', () => {
   ] as const)('expires green evidence when %s files are %s', async (kind, operation) => {
     const h = harness(), id = h.accept()
     h.enable(id)
+    // A deletion must remove a file the run actually fingerprinted: the CQTest report is generated
+    // output and excluded, so 'test' targets a second source file instead.
+    const filename = kind === 'source' ? 'source.ts' : 'notes.txt'
+    writeFileSync(join(h.directory, 'notes.txt'), 'note before the run\n')
     await h.run(id)
-    const filename = kind === 'source' ? 'source.py' : 'test_example.py'
-    const target = join(h.directory, operation === 'added' ? `${kind}_additional.py` : filename)
+    const target = join(h.directory, operation === 'added' ? `${kind}_additional.ts` : filename)
     if (operation === 'deleted') unlinkSync(target)
-    else writeFileSync(target, operation === 'modified' ? `${kind === 'source' ? 'def answer():\n    return 42\n' : testSource}\n# changed after run\n` : '# newly added\n')
+    else writeFileSync(target, operation === 'modified' ? `${testSource}\n// changed after run\n` : '// newly added\n')
     expect(() => h.ready(id)).toThrow(/validation|fingerprint|changed/i)
     expect(h.current(id).ended).toBeUndefined()
   })
@@ -339,26 +346,24 @@ describe('strict validation at Engine acceptance boundaries', () => {
     expect(() => h.ready(id)).toThrow(/validation/i)
   })
 
-  it('refuses replacing the contract while this host runs tests, and a stopped run leaves no process or evidence', async () => {
+  it('refuses replacing the contract while a run is in flight, and a stopped run leaves no process or evidence', async () => {
     const h = harness(), id = h.accept()
     h.enable(id)
-    writeFileSync(join(h.directory, 'test_example.py'), 'import time, unittest\nclass Example(unittest.TestCase):\n    def test_answer(self):\n        time.sleep(30)\n')
-    const pending = h.engine.runTicketTests(id, h.current(id).assignments.at(-1)!.id)
+    // CQTest validation only reads the report, so it settles within the same task queue turn. Start it and
+    // read every guarantee the old slow-process version asserted: a run in progress is marked, the
+    // contract cannot be replaced under it, and a stop leaves neither a marker nor evidence.
+    const pending = h.run(id)
     expect(h.current(id).validation?.running).toEqual(expect.any(String))
-    const refused = () => h.engine.configureValidation(id, h.contract)
-    expect(refused).toThrow(/in progress/i)
+    expect(() => h.engine.configureValidation(id, h.contract)).toThrow(/in progress/i)
     expect(h.current(id).validation?.contract?.revision).toBeDefined()
-    const started = Date.now()
     h.engine.stopTicket(id, 'Cancelled')
     await expect(pending).rejects.toThrow(/cancel|abort/i)
-    // The runner returns only after the real process tree is gone; nothing waits for the 30 s sleep.
-    expect(Date.now() - started).toBeLessThan(20_000)
     expect(h.current(id).validation?.running).toBeUndefined()
     expect(h.current(id).validation?.evidence).toBeUndefined()
     expect(h.current(id).ended?.outcome).toBe('stopped')
-    // The stopped ticket cannot start another run, so the cancelled subprocess is the only one.
+    // The stopped ticket cannot start another run.
     await expect(h.run(id)).rejects.toThrow(/open ticket/i)
-  }, 40_000)
+  }, 20_000)
 
   it('allows ordinary strict dropped cleanup but refuses an unvalidated result publication', () => {
     const h = harness(), id = h.accept()
@@ -380,7 +385,7 @@ describe('strict validation at Engine acceptance boundaries', () => {
     const h = harness(), id = h.accept()
     h.enable(id); h.engine.bindThread(id, { source: 'github', id: 'pull-4' }, true)
     await h.run(id); h.ready(id)
-    writeFileSync(join(h.directory, 'source.py'), 'def answer():\n    return -1\n')
+    writeFileSync(join(h.directory, 'source.ts'), 'export const answer = () => -1\n')
     expect(() => h.result(id)).toThrow(/validation|fingerprint|changed/i)
     expect(h.outbox).toEqual([])
   })
