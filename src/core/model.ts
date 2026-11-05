@@ -303,6 +303,14 @@ export interface Ticket {
   origin: { triggerId: string; triggerIds: string[] }
   /** What its Executor chose: its short name, directory and assignment text. */
   execution?: Execution
+  /** Trusted host-managed opt-in acceptance; serialized with the ticket across restarts. */
+  validation?: import('./validation.ts').StrictValidation
+  /** Independent operator-attested review, opt-in independently of strict tests; persisted with the ticket. */
+  review?: import('./review.ts').IndependentReview
+  /** Trusted opt-in design scope/document confirmation, independent of whole-workspace review. */
+  designApproval?: import('./design.ts').DesignApproval
+  /** Host-only delivery grants and durable side-effect ledger; never an Input delivery error. */
+  deliveryAuthorization?: import('./delivery.ts').DeliveryState
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
 }

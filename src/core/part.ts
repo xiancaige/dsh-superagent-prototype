@@ -2,7 +2,11 @@
 import { UserError } from './errors.ts'
 import { followupOwners, reached, threadKey } from './model.ts'
 import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
+import { assertTicketValidated } from './validation.ts'
+import type { AcceptanceFacts, Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Environments, Executor, Outbox, Policy, Repositories,
+  SourceScope } from './ports.ts'
+import type { CaptureBinding, CaptureOutcome, SettledReport, VisualContract, VisualEvidence } from '../visual-host.ts'
+
 
 export interface EngineOptions {
   repo: Repositories
@@ -12,9 +16,31 @@ export interface EngineOptions {
   assessor: Assessor
   executor: Executor
   outbox: Outbox
+  /**
+   * Phase B host-side visual adapter: captures frames only through the fixed trusted tool and judges
+   * them only by reading them with the fixed inspector. Omitted, visual acceptance is unavailable.
+   */
+  visualCapture?: VisualCapture
+  /** Explicit trusted adapter. Absent by default: no command or real channel is assumed. */
+  deliveryTarget?: import('./delivery.ts').DeliveryTarget
+  /**
+   * Phase 2 C: the shared environment a ticket takes when it is accepted and gives back only when its
+   * acceptance passed, a person hands it over, or its work ends. Omitted, no ticket holds anything.
+   */
+  environments?: Environments
+  /** Phase 2 C completion fact: whether the strict acceptance this ticket requires actually passed. */
+  acceptance?: AcceptanceFacts
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string
   emit?: (event: DomainEvent) => void
+}
+
+/** What the Engine asks of the host visual adapter. Neither method may accept worker-supplied evidence. */
+export interface VisualCapture {
+  capture(binding: CaptureBinding, count: number, prepared: { at: string } | undefined, signal: AbortSignal): Promise<CaptureOutcome>
+  /** `settled` is every report this ticket already decided, which a new report may not contradict. */
+  assess(contract: VisualContract, ticketId: string, assignmentId: string, workspace: string, signal: AbortSignal,
+    settled?: readonly SettledReport[]): Promise<VisualEvidence>
 }
 
 /**
@@ -65,6 +91,27 @@ export abstract class EnginePart {
     this.options.emit?.({ type, at: this.now(), data } as DomainEvent)
   }
   protected require(ticketId: string): Ticket { const ticket = this.repo.tickets.get(ticketId); if (!ticket) throw new UserError('unknownTicket'); return ticket }
+  /** The environment port, when the deployment has one; a ticket holds nothing otherwise. */
+  protected environments(): Environments | undefined { return this.options.environments }
+  /**
+   * Whether the ticket's own strict acceptance passed. A ticket without strict acceptance is judged by
+   * what it recorded, exactly as before; one with it needs the host's own check, never a report.
+   */
+  protected acceptancePassed(ticket: Ticket): boolean {
+    // Review/design are independently opt-in, including on tickets without strict tests.
+    try { assertTicketValidated(ticket); return true } catch { return false }
+  }
+  /** Whether this deployment can confirm the ticket's acceptance (see `EngineOptions.acceptance`). */
+  protected acceptanceKnown(): boolean { return !!this.options.acceptance }
+  /**
+   * Whether the ticket may be completed: a deployment that shows its acceptance requires the host to confirm
+   * it; one that does not — unless it holds the environment, which is released only on an acceptance — is
+   * judged by the records it requires to be complete, exactly as before.
+   */
+  protected completion(ticket: Ticket): boolean {
+    if (!this.acceptanceKnown()) return this.environments() ? false : this.acceptancePassed(ticket)
+    return this.options.acceptance!(ticket)
+  }
   /** Returns the stored Thread or an unsaved empty Thread aggregate. */
   protected thread(ref: ThreadRef): Thread {
     const k = threadKey(ref)

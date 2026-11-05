@@ -4,6 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { assertTicketDesignApproved } from '../core/design.ts'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
@@ -48,6 +49,8 @@ const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAI
  * connection that was refused, reset, timed out, or could not resolve its host.
  */
 export function transient(error: unknown): boolean {
+  // A held environment is a decision, not a network failure: its message names a pid that must not read as an HTTP status.
+  if ((error as { name?: unknown } | undefined)?.name === 'EnvironmentHeld') return false
   const status = (error as { status?: unknown } | undefined)?.status
   if (typeof status === 'number') return status === 408 || status === 429 || status >= 500
   const text = error instanceof Error ? `${error.name} ${error.message} ${String((error as { code?: unknown }).code ?? '')}` : String(error)
@@ -60,14 +63,14 @@ export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
-  readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
+  readonly engine: Pick<EngineForExecutor, 'deferDesignResume' | 'ensureEnvironment' | 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
-  readonly machine: Pick<Machine, 'stateDir'>
+  readonly machine: Pick<Machine, 'stateDir' | 'workspaceMode' | 'sourceRoot'>
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -95,7 +98,7 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
-  stateDir: string): Execution {
+  stateDir: string, machine?: Pick<Machine, 'workspaceMode' | 'sourceRoot'>): Execution {
   const name = ticketWorktreeName(outcome.name ?? '', ticket.id)
   const source = ticket.origin.triggerId
   const note = outcome.note ? `\nRouting note (not the source request): ${outcome.note}` : ''
@@ -107,7 +110,9 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  const directory = machine?.workspaceMode === 'source' ? machine.sourceRoot : join(executionRoot(settings, stateDir), name)
+  if (!directory) throw new Error('Source workspace has no sourceRoot')
+  return { name, directory, assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -236,7 +241,7 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, this.host.machine) }
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
@@ -251,7 +256,9 @@ export class DshExecutor implements Executor {
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+    if (command) await runAsWorker(this.host.context.subprocess,
+      process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
+      dirname(directory), signal, env)
       .catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
         await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
@@ -300,6 +307,8 @@ export class DshExecutor implements Executor {
         const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
         const inputId = ticket?.undelivered[0]
         if (!ticket || !assignment || inputId === undefined) return
+        try { assertTicketDesignApproved(ticket, assignment.id) }
+        catch (error) { throw new Later(error instanceof Error ? error.message : String(error)) }
         // Waking an idle worker reserves a slot (including the extra slot reserved for human follow-ups).
         const sessionId = workerSessionId(ticketId)
         if (!woken && !this.running(ticket)) {
@@ -314,6 +323,8 @@ export class DshExecutor implements Executor {
           if (!this.host.context.agents.get(sessionId as SessionId)) {
             await this.host.sessions.ensure(sessionId, ticket.execution?.directory ?? '', ticket.title, 'worker')
           }
+          // A message to a worker that handed the environment over takes it again first, or is refused naming its holder.
+          this.host.engine.ensureEnvironment(ticketId)
           if (input) await this.deliverInput(ticket, assignment, input)
         } catch (error) {
           if (this.host.closing() || error instanceof Later) throw error
@@ -331,6 +342,8 @@ export class DshExecutor implements Executor {
     const live = () => {
       const current = this.host.store.tickets.get(ticket.id)
       if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) throw new Error('The ticket ended or another Assignment took it over')
+      try { assertTicketDesignApproved(current, assignment.id) }
+      catch (error) { throw new Later(error instanceof Error ? error.message : String(error)) }
       // A stop of the worker's background work that started meanwhile ends with a cancel, which would drop the Input.
       if (this.stopping.has(ticket.id)) throw new Later('The worker\'s background work is stopping')
     }
@@ -426,17 +439,30 @@ export class DshExecutor implements Executor {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
       if (this.host.paused()) throw new Later('Processing is paused')
       const stored = this.host.store.tickets.get(ticket.id)
-      return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
+      if (stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id) {
+        try { assertTicketDesignApproved(stored, assignment.id) }
+        catch (error) { throw new Later(error instanceof Error ? error.message : String(error)) }
+        return true
+      }
+      return false
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
     // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    if (this.host.machine.workspaceMode === 'source') {
+      // Never reinterpret persisted isolated tickets, create directories, or run prepare in the shared checkout.
+      if (workspace !== this.host.machine.sourceRoot) throw new PrepareFailed('Persisted ticket workspace differs from sourceRoot; use a new source-mode ticket')
+      if (!await stat(workspace).then(value => value.isDirectory(), () => false)) throw new PrepareFailed('Source workspace must already exist')
+      await verifyDirectory(workspace, this.host.context.subprocess, this.host.lifetime)
+    } else if (!await stat(workspace).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }
     if (!current()) return
+    // Phase 2 C: a worker that continues (retry, resumed ticket, restart) takes the environment again, or is refused
+    // naming its holder; it is never launched on an environment another ticket holds.
+    this.host.engine.ensureEnvironment(ticket.id)
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')
     if (!current()) return
@@ -568,7 +594,28 @@ export class DshExecutor implements Executor {
         if (!(failure instanceof Later)) throw failure
         this.after(SLOT_WAIT_MS, go); return
       }
-      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue')
+      const authorize = () => {
+        const current = this.host.store.tickets.get(ticketId)
+        if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignmentId) throw new Error('Retry assignment ended')
+        assertTicketDesignApproved(current, assignmentId)
+      }
+      try { authorize() } catch {
+        if (waking) this.slots.free(ticketId)
+        this.resuming.delete(assignmentId)
+        this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
+        return
+      }
+      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue', authorize)
+        .catch(failure => {
+          const current = this.host.store.tickets.get(ticketId)
+          if (current?.designApproval?.required) {
+            try { assertTicketDesignApproved(current, assignmentId) } catch {
+              this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
+              return
+            }
+          }
+          throw failure
+        })
       void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
         .catch(failure => { this.failed(ticketId, String(failure)) }))
     }

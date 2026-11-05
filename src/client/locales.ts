@@ -724,6 +724,9 @@ const TEXT = {
   'userError.sourceNotInstalled': ['{source} 来源的插件没有安装。', USER_ERRORS.sourceNotInstalled[1]],
   'userError.noLabels': ['这个来源没有可以刷新的名称。', USER_ERRORS.noLabels[1]],
   'userError.nothingToSync': ['{source} 来源上的策略没有指定从哪里同步，或者这个来源已关闭或在等待部署检查。', USER_ERRORS.nothingToSync[1]],
+  'userError.noEnvironment': ['这个部署没有工单持有的共享环境，没有可交接的东西。', USER_ERRORS.noEnvironment[1]],
+  'userError.notHolding': ['这个工单没有持有共享环境。', USER_ERRORS.notHolding[1]],
+  'userError.ticketLive': ['这个工单仍在运行；请改为交接或停止它的环境。', USER_ERRORS.ticketLive[1]],
   // Setup problems and health codes; English reuses the host's own text read by the log and main Session
   'setup.repositoryUnset': ['GitHub 来源没有设置监听的仓库。', SETUP_PROBLEMS.repositoryUnset[1]],
   'setup.foreignFile': ['{file} 不是 dsh-superagent 写入的文件；移走它，或换一个状态目录。', SETUP_PROBLEMS.foreignFile[1]],

@@ -12,9 +12,13 @@ import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { DELIVERY_LEVELS } from '../core/delivery.ts'
+import { ReviewConfigurationRequest, ReviewDecisionRequest } from '../core/review.ts'
+import { DesignConfigurationRequest, DesignApprovalRequest } from '../core/design.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
-import type { Health } from '../sources/host.ts'
+import type { Health, SourceContext } from '../sources/host.ts'
+import { LOCAL, LocalConflict, LocalId, localMessages, receiveLocal } from '../sources/local.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
@@ -27,6 +31,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import type { EnvironmentExclusivityView } from './environment-exclusive.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -47,12 +52,15 @@ export interface HttpHost {
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
   readonly feishuProblem?: SetupProblem | undefined
+  context(kind: { kind: string; health: readonly string[] }): SourceContext
   configured(): boolean
   links(): LinkTarget
   ticketEnvironment(ticket: Ticket): Variable[]
   checkSetup(): void
   requestPass(): void
   models(): Promise<ModelCatalog>
+  /** Phase 2 C: the shared TP environment's holder, heartbeat and latest release, as a person sees it. */
+  environment(): EnvironmentExclusivityView
 }
 /**
  * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
@@ -86,6 +94,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
+  if (error instanceof LocalConflict) return [409, { error: error.message }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
@@ -138,6 +147,15 @@ type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
+/** Phase B visual contract: fixed scenario, fixed capture tool, host-trusted inspector and named checks. */
+const VisualContractRequest = z.object({
+  scenario: z.string().min(1),
+  capture: z.object({ server: z.string().min(1), tool: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
+    timeoutMs: z.number().int().positive().max(300_000).optional() }).strict(),
+  inspector: z.object({ executable: z.string().min(1), args: z.array(z.string()).optional() }).strict(),
+  checks: z.array(z.string().min(1)).min(1),
+  minimumFrames: z.number().int().min(1).max(20),
+}).strict()
 const ThreadsQuery = z.object({ filter: z.enum(THREAD_FILTERS).catch('subscribed'), offset, limit: limit(20, 1000) })
 const ThreadQuery = z.object({ limit: limit(50, 100), before: z.string().optional(), around: z.string().optional() })
 const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.literal('24h').optional().catch(undefined), offset,
@@ -153,6 +171,15 @@ function routes(runtime: HttpHost): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'POST local/messages': async ({ body }) => {
+      if (!runtime.sources.instance(LOCAL)?.enabled) throw new RouteError(404, 'Local source is not enabled')
+      return receiveLocal(runtime.context({ kind: LOCAL, health: [] }), await body())
+    },
+    'GET local/messages': ({ query }) => {
+      if (!runtime.sources.instance(LOCAL)?.enabled) throw new RouteError(404, 'Local source is not enabled')
+      const thread = LocalId.parse(query.thread)
+      return { thread, messages: localMessages(runtime.context({ kind: LOCAL, health: [] }), thread) }
+    },
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -190,8 +217,77 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
+    // Management-only transcription; no worker signing tool is registered.
+    'GET tickets/:id/review': ({ params }) => ({ review: store.tickets.get(ticket(params.id))!.review ?? null }),
+    'PUT tickets/:id/review': async ({ params, body }) => {
+      const input = ReviewConfigurationRequest.parse(await body())
+      return { review: runtime.engine.configureReview(ticket(params.id), input).review! }
+    },
+    'POST tickets/:id/review': async ({ params, body }) => {
+      const input = ReviewDecisionRequest.parse(await body())
+      return { review: runtime.engine.recordReview(ticket(params.id), input).review! }
+    },
+    'GET tickets/:id/design': ({ params }) => ({ designApproval: store.tickets.get(ticket(params.id))!.designApproval ?? null }),
+    'PUT tickets/:id/design': async ({ params, body }) => {
+      const input = DesignConfigurationRequest.parse(await body())
+      return { designApproval: runtime.engine.configureDesign(ticket(params.id), input).designApproval! }
+    },
+    'POST tickets/:id/design': async ({ params, body }) => {
+      const input = DesignApprovalRequest.parse(await body())
+      return { designApproval: runtime.engine.approveDesign(ticket(params.id), input).designApproval! }
+    },
+    'GET tickets/:id/validation': ({ params }) => ({ validation: store.tickets.get(ticket(params.id))!.validation ?? null }),
+    'PUT tickets/:id/validation': async ({ params, body }) => {
+      const input = z.object({ enabled: z.literal(true), contract: z.object({
+        adapter: z.enum(['python-unittest', 'node-test', 'cqtest-report']), executable: z.string().min(1), workspace: z.string().min(1),
+        requiredTestIds: z.array(z.string().min(1)).min(1), timeoutMs: z.number().int().positive().max(600_000).optional(),
+      }).strict().optional(), visual: VisualContractRequest.optional() }).strict().parse(await body())
+      const updated = runtime.engine.configureValidation(ticket(params.id), input.contract)
+      // Phase B shares the opt-in: a visual contract is configured only on a ticket that has it.
+      if (input.visual) runtime.engine.configureVisual(ticket(params.id), input.visual)
+      return { validation: updated.validation! }
+    },
+    'PUT tickets/:id/validation/visual': async ({ params, body }) => {
+      const input = VisualContractRequest.parse(await body())
+      runtime.engine.configureVisual(ticket(params.id), input)
+      return { validation: store.tickets.get(ticket(params.id))!.validation ?? null }
+    },
+    'POST tickets/:id/validation/visual/prepare': ({ params }) => {
+      const id = ticket(params.id)
+      runtime.engine.prepareVisualCapture(id)
+      return { prepared: true }
+    },
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    'GET tickets/:id/delivery': ({ params }) => runtime.engine.deliveryState(ticket(params.id)),
+    'PUT tickets/:id/delivery': async ({ params, body }) => {
+      const input = z.object({ level: z.enum(DELIVERY_LEVELS), granted: z.boolean() }).strict().parse(await body())
+      return runtime.engine.configureDelivery(ticket(params.id), input.level, input.granted, 'management-panel')
+    },
+    'POST tickets/:id/delivery': async ({ params, body }) => {
+      const input = z.object({ level: z.enum(DELIVERY_LEVELS), assignmentId: z.string().min(1), requestId: z.string().min(1).max(200) }).strict().parse(await body())
+      return runtime.engine.deliverTicket(ticket(params.id), input.assignmentId, input.level, input.requestId)
+    },
+    'GET environment': () => runtime.environment(),
+    'POST tickets/:id/environment/handover': async ({ params, body }) => {
+      const id = ticket(params.id)
+      // A person's handover is explicit; without a body the tab keeps the ticket running for rework.
+      const raw = await body()
+      const request = z.object({ stop: z.boolean().optional() }).strict().parse(raw ?? {})
+      const result = await runtime.engine.handOverEnvironment(id)
+      if (result.handedOver && request.stop) runtime.engine.stopTicket(id, 'the person handed the environment over')
+      return result
+    },
+    'POST tickets/:id/environment/acquire': ({ params }) => runtime.engine.acquireEnvironment(ticket(params.id)),
+    'POST tickets/:id/environment/release': ({ params }) => runtime.engine.releaseEndedEnvironment(ticket(params.id)),
+    'POST tickets/:id/delivery/reconcile': async ({ params, body }) => {
+      const input = z.discriminatedUnion('result', [
+        z.object({ operationKey: z.string().min(1), result: z.literal('delivered'), receipt: z.string().min(1) }).strict(),
+        z.object({ operationKey: z.string().min(1), result: z.literal('discarded'), reason: z.string().min(1) }).strict(),
+      ]).parse(await body())
+      const outcome = input.result === 'delivered' ? { result: 'delivered' as const, receipt: input.receipt } : { result: 'discarded' as const, reason: input.reason }
+      return { state: runtime.engine.reconcileDelivery(ticket(params.id), input.operationKey, outcome, 'management-panel').state }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)

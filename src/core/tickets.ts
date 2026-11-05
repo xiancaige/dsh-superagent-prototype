@@ -1,5 +1,6 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
+import { assertTicketValidated } from './validation.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
@@ -47,11 +48,30 @@ export class Tickets extends EnginePart {
       if (channel && !ticket.channels.some(item => sameChannel(item, channel))) ticket.channels.push(channel)
     }
     ticket = this.options.prepareTicket?.(ticket, outcome) ?? ticket
+    // Phase 2 C: the environment is taken before the ticket's directory is prepared and before any
+    // editor may be started; a holder that has it keeps this ticket from starting.
+    const environments = this.environments()
+    let blocked: string | undefined
+    if (environments) {
+      try { environments.acquire(id, ticket.title) } catch (error) {
+        blocked = `TP environment block: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
     const assignment = this.newAssignment(ticket)
+    if (blocked) {
+      // The ticket is recorded and waits on a person; it gets no launch with a holder's environment.
+      ticket.validation = { ...ticket.validation, enabled: true, blocked }
+      this.repo.tickets.save(ticket)
+      for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
+      this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
+      this.emit('ticket.exclusive', { ticketId: id, action: 'refused', reason: blocked })
+      return
+    }
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
     if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
     this.options.executor.start(this.require(id), assignment)
+    if (environments) this.emit('ticket.exclusive', { ticketId: id, action: 'acquired' })
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
   /**
@@ -83,6 +103,18 @@ export class Tickets extends EnginePart {
       this.repo.tickets.save(ticket)
       const done = this.followsDone(ticket)
       if (!done || this.unfinished(ticket, at)) continue
+      // Preserve the source fact even when strict acceptance defers completion. Do not
+      // throw and roll back all subscriptions of this thread (including legacy tickets).
+      try { assertTicketValidated(ticket) }
+      catch (error) {
+        const blocked = error instanceof Error ? error.message : String(error)
+        if (ticket.designApproval?.required) ticket.designApproval.blocked = blocked
+        if (ticket.review?.required) ticket.review.blocked = blocked
+        else if (!ticket.validation?.enabled && !ticket.designApproval?.required) throw error
+        if (ticket.validation?.enabled) ticket.validation.blocked = blocked
+        this.repo.tickets.save(ticket)
+        continue
+      }
       // Work resumed after the close and finished ends now.
       const resumed = Date.parse(latestAssignment(ticket)?.createdAt ?? '') > Date.parse(at)
       this.end(ticket.id, 'executor', done.outcome, resumed ? this.now() : done.at)
@@ -159,7 +191,10 @@ export class Tickets extends EnginePart {
    */
   stop(ticketId: string, reason?: string): Ticket {
     this.end(ticketId, 'human', 'stopped', this.now(), reason)
-    return this.require(ticketId)
+    const ticket = this.require(ticketId)
+    // A stop is a person's fact even when the ticket had already ended: the environment it held comes back.
+    if (ticket.ended?.outcome === 'stopped' && this.environments()) this.endEnvironment(ticketId, { by: 'human', outcome: 'stopped' })
+    return ticket
   }
   /**
    * Ends the stalled assignment of a retryable open ticket (`failed`, `blocked`, or failed input delivery) and starts a new one.
@@ -345,6 +380,17 @@ export class Tickets extends EnginePart {
   end(ticketId: string, by: TicketEndBy, outcome: TicketOutcome, at = this.now(), reason?: string): void {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) return
+    // Phase 2 C: a completion must be the one the host's own acceptance confirms, never a worker's report: one
+    // it cannot confirm is refused here and changes nothing, so the ticket keeps the environment for the rework
+    // and a person sees the refusal's reason.
+    if (outcome === 'completed' && !this.completion(ticket)) {
+      throw new Error('TP environment: the ticket has not passed the acceptance this deployment requires, so it is not completed and keeps the environment for rework')
+    }
+    const completed = outcome === 'completed'
+    // A stop here releases with its own fact; a confirmed completion is released by the host's completion; any
+    // other end is the work ending by itself, so the host releases for that fact too (see `endEnvironment`).
+    const releases = by === 'human' ? undefined : this.environments()
+    if (outcome === 'completed' || outcome === 'merged' || outcome === 'closed') assertTicketValidated(ticket)
     const stopping = ticket.assignments.filter(assignment => assignment.state !== 'ended')
     const why = reason && reason !== outcome ? { reason } : {}
     const until = readUntil(ticket)
@@ -358,8 +404,18 @@ export class Tickets extends EnginePart {
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }
     this.repo.tickets.save(ticket)
     this.letGo(ticketId, waiting, left)
+    // The host's own confirmation passed above, so a completion is released with that acceptance fact: the editor this
+    // ticket started is stopped first, and a failed stop keeps the lock (see `TicketedEnvironment.end`).
+    if (releases) this.endEnvironment(ticketId, { by, outcome }, completed)
     this.emit('ticket.ended', { ticketId, by, outcome, ...why })
     for (const assignment of stopping) this.options.executor.stop(ticket, assignment, reason ?? outcome)
+  }
+  /** The host releases the environment for a ticket that ended by itself; a failure is reported, never retried blindly. */
+  private endEnvironment(ticketId: string, ended: { by: TicketEndBy; outcome: TicketOutcome }, acceptancePassed = false): void {
+    const environments = this.environments()
+    if (!environments?.end) return
+    void environments.end(ticketId, ended, acceptancePassed).catch(error => this.emit('ticket.handover', { ticketId, handedOver: false,
+      error: `The environment release failed: ${error instanceof Error ? error.message : String(error)}` }))
   }
   /**
    * Whether a ticket's work has not finished at a close at `at`: its worker took up a person's message the ticket decides and

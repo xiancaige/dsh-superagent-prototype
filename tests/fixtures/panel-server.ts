@@ -291,6 +291,8 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'POST local/messages': { body: true, answer: ({ body }) => ({ id: body.id, thread: body.thread ?? body.id, triggerId: `local:message:${body.id}`, result: 'stored' }) },
+  'GET local/messages': { query: ['thread'], answer: ({ query }) => ({ thread: query.thread ?? '', messages: [] }) },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
@@ -327,6 +329,18 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET tickets': { query: ['state', 'offset', 'limit'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
     : 'open']) },
   'GET tickets/:id': { answer: ({ params }) => server.ticketDetails[params.id] ?? refuse(404, 'Ticket not found') },
+  // Independent review is operator-managed, not simulated by this panel fixture.
+  'GET tickets/:id/design': { answer: () => ({ designApproval: null }) },
+  'PUT tickets/:id/design': { body: true, answer: () => refuse(400, 'Host design is not simulated by the panel fixture') },
+  'POST tickets/:id/design': { body: true, answer: () => refuse(400, 'Host design is not simulated by the panel fixture') },
+  'GET tickets/:id/review': { answer: () => ({ review: null }) },
+  'PUT tickets/:id/review': { body: true, answer: () => refuse(400, 'Host review is not simulated by the panel fixture') },
+  'POST tickets/:id/review': { body: true, answer: () => refuse(400, 'Host review is not simulated by the panel fixture') },
+  // Strict validation has no panel controls yet; the fixture must not pretend to execute host tests.
+  'GET tickets/:id/validation': { answer: () => ({ validation: null }) },
+  'PUT tickets/:id/validation': { body: true, answer: () => refuse(400, 'Host validation is not simulated by the panel fixture') },
+  'PUT tickets/:id/validation/visual': { body: true, answer: () => refuse(400, 'Host visual validation is not simulated by the panel fixture') },
+  'POST tickets/:id/validation/visual/prepare': { answer: () => refuse(400, 'Host visual capture is not simulated by the panel fixture') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
     const ticket = ticketOf(params.id)
     if (!ticket) return refuse(404, 'Ticket not found')
@@ -338,6 +352,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
   } },
+  'GET tickets/:id/delivery': { answer: () => ({}) },
+  'PUT tickets/:id/delivery': { body: true, answer: () => refuse(400, 'No simulation target configured in this panel fixture') },
+  'POST tickets/:id/delivery': { body: true, answer: () => ({ refused: true as const, reasons: ['No operator grant/target configured'] }) },
+  'GET environment': { answer: () => ({ held: false }) },
+  'POST tickets/:id/environment/handover': { body: true, answer: ({ params }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return { handedOver: false, files: 0, error: 'this panel fixture holds no TP environment' }
+  } },
+  'POST tickets/:id/environment/acquire': { answer: () => refuse(409, 'this panel fixture holds no TP environment') },
+  'POST tickets/:id/environment/release': { answer: () => refuse(409, 'this panel fixture holds no TP environment') },
+  'POST tickets/:id/delivery/reconcile': { body: true, answer: () => refuse(409, 'no delivery to reconcile in this panel fixture') },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }
     server.revisions.pause = (server.revisions.pause ?? 0) + 1

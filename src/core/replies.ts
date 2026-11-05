@@ -1,5 +1,6 @@
 /** The Engine's messages to Channels, each by the rule that allows it. */
 import { key } from './ids.ts'
+import { assertTicketValidated } from './validation.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
 import type { ChannelRef, Ticket, Trigger } from './model.ts'
@@ -71,6 +72,8 @@ export class Replies extends EnginePart {
       const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
       const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported
       if (!ticket || !ready) throw new UserError('notReady')
+      // Even a dropped result must not be used as an unvalidated success publication.
+      assertTicketValidated(ticket)
     }
     const attention = request.purpose === 'attention' ? ticket?.attention : undefined
     // Attention replies must match the ticket's currently open question text.

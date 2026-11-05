@@ -6,6 +6,9 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { MemoryRepositories } from '../src/core/index.ts'
+import type { Trigger } from '../src/core/index.ts'
+import type { SourceContext } from '../src/sources/host.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -24,6 +27,53 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
 }
+
+it('guards local intake, validates input, reports retry conflicts and reads its durable transcript', async () => {
+  const repo = new MemoryRepositories(), state = new Map<string, unknown>()
+  let received = 0, enabled = true
+  const host = {
+    triggers: repo.triggers, atomic: <T>(run: () => T) => run(),
+    state: { get: (key: string) => state.get(key), set: (key: string, value: unknown) => { state.set(key, value) } },
+    receive: (trigger: Trigger) => { received++; if (repo.triggers.get(trigger.id)) return 'duplicate'; repo.triggers.save(trigger); return 'stored' },
+  } as unknown as SourceContext
+  const call = serve({ sources: { instance: () => ({ enabled }) }, context: () => host })
+  const body = { id: 'task', text: 'Real request' }
+  for (const headers of [{ 'x-orchestrator-request': undefined }, { host: 'evil:3082' }, { origin: 'http://evil' }]) {
+    expect(await call('POST', 'local/messages', body, headers)).toMatchObject({ status: 403 })
+  }
+  expect(received).toBe(0)
+  expect(await call('POST', 'local/messages', { ...body, actor: 'admin' })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'local/messages', body)).toMatchObject({ status: 200, body: { triggerId: 'local:message:task', thread: 'task', result: 'stored' } })
+  expect(await call('POST', 'local/messages', body)).toMatchObject({ status: 200, body: { result: 'duplicate' } })
+  expect(await call('POST', 'local/messages', { ...body, thread: 'different' })).toMatchObject({ status: 409 })
+  expect(await call('GET', 'local/messages?thread=task')).toMatchObject({ status: 200, body: { messages: [{ id: 'task', from: 'operator', text: 'Real request' }] } })
+  enabled = false
+  expect(await call('POST', 'local/messages', body)).toMatchObject({ status: 404 })
+})
+
+it('configures strict acceptance only through explicit management schema and exposes host evidence', async () => {
+  const calls: unknown[] = []
+  const validation = { enabled: true as const, contract: { revision: 'r1' } }
+  const call = serve({ store: { tickets: { get: (id: string) => id === 't1' ? { validation } : undefined } },
+    engine: { configureValidation: (id: string, input: unknown) => { calls.push([id, input]); return { validation } } } })
+  const contract = { adapter: 'python-unittest', executable: 'C:/Python/python.exe', workspace: 'C:/work/t1', requiredTestIds: ['test_one.Suite.test_ok'] }
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract })).toMatchObject({ status: 200, body: { validation } })
+  expect(calls).toEqual([['t1', contract]])
+  for (const body of [{ enabled: false }, { enabled: true, evidence: { passed: true } },
+    { enabled: true, contract: { ...contract, adapter: 'unsupported' } },
+    { enabled: true, contract: { ...contract, revision: 'worker-version' } },
+    { enabled: true, contract: { ...contract, command: 'echo OK' } }]) {
+    expect(await call('PUT', 'tickets/t1/validation', body)).toMatchObject({ status: 400 })
+  }
+  expect(calls).toHaveLength(1)
+  const nodeContract = { ...contract, adapter: 'node-test', executable: 'C:/Node/node.exe', requiredTestIds: ['one.test.mjs::["test name"]'] }
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: nodeContract })).toMatchObject({ status: 200 })
+  expect(calls.at(-1)).toEqual(['t1', nodeContract])
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: { ...nodeContract, args: ['-e', ''] } })).toMatchObject({ status: 400 })
+  expect(await call('GET', 'tickets/t1/validation')).toMatchObject({ status: 200, body: { validation } })
+  expect(await call('GET', 'tickets/missing/validation')).toMatchObject({ status: 404 })
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true }, { 'x-orchestrator-request': undefined })).toMatchObject({ status: 403 })
+})
 
 it('answers each kind of failure with its own status', async () => {
   const saves: unknown[] = []
@@ -95,4 +145,28 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+
+it('keeps delivery grants operator-only and refuses worker commands/evidence through HTTP schemas', async () => {
+  const calls: unknown[] = []
+  const call = serve({ store: { tickets: { get: (id: string) => id === 'd1' ? { id } : undefined } },
+    engine: {
+      deliveryState: () => ({}),
+      configureDelivery: (...args: unknown[]) => { calls.push(args); return {} },
+      deliverTicket: (...args: unknown[]) => { calls.push(args); return { refused: true, reasons: ['No grant'] } },
+    } })
+  expect(await call('GET', 'tickets/d1/delivery')).toMatchObject({ status: 200, body: {} })
+  for (const extra of [{ command: 'publish' }, { evidence: { passed: true } }, { by: 'worker' }, { expiresAt: 'forever' }]) {
+    expect(await call('PUT', 'tickets/d1/delivery', { level: 'release', granted: true, ...extra })).toMatchObject({ status: 400 })
+  }
+  expect(calls).toEqual([])
+  expect(await call('PUT', 'tickets/d1/delivery', { level: 'push', granted: true })).toMatchObject({ status: 200 })
+  expect(calls).toEqual([['d1', 'push', true, 'management-panel']])
+  expect(await call('POST', 'tickets/d1/delivery', { level: 'release', assignmentId: 'a1', requestId: 'r1', command: 'publish' }))
+    .toMatchObject({ status: 400 })
+  expect(await call('POST', 'tickets/d1/delivery', { level: 'release', assignmentId: 'a1', requestId: 'r1' }))
+    .toMatchObject({ status: 200, body: { refused: true, reasons: ['No grant'] } })
+  expect(calls.at(-1)).toEqual(['d1', 'a1', 'release', 'r1'])
+  expect(await call('PUT', 'tickets/d1/delivery', { level: 'release', granted: true }, { origin: 'http://evil' })).toMatchObject({ status: 403 })
 })

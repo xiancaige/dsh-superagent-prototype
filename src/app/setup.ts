@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, localDeployment, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -18,7 +18,8 @@ const setupFields = (settings: Settings) =>
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
- * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
+ * Explicit local mode optionally verifies a configured Feishu bot, without GitHub, shims, or process-wide environment changes.
+ * GitHub mode resolves the repository and accounts by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
  * `Runtime` runs it at startup to gate orchestration readiness, while `Settings` uses it to validate account changes, update blocked command shims, and schedule restarts.
  */
 export class Setup {
@@ -31,11 +32,14 @@ export class Setup {
   private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
   constructor(private readonly host: SetupHost) {
-    this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
-    this.variables = agentVariables(host.machine.stateDir)
+    const local = host.machine.executionMode === 'local'
+    this.path = local ? process.env.PATH ?? '' : withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
+    this.variables = local ? {} : agentVariables(host.machine.stateDir)
   }
   /** Host command environment with agent git variables applied and the worker shim directory excluded from PATH. */
-  get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
+  get commandEnvironment(): Record<string, string | undefined> {
+    return this.host.machine.executionMode === 'local' ? {} : { ...this.variables, PATH: this.path }
+  }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
     return this.resolved
@@ -60,12 +64,16 @@ export class Setup {
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
+    if (machine.executionMode === 'local') {
+      if (block === 'source:github') throw new UserError('sourceNotInstalled', { source: 'github' })
+      if (block !== 'source:feishu') return
+    }
+    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, (argv, env) => this.probe()(argv, env))
       : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
-    if (this.resolved) await writeEnvironment(this.resolved, blocked)
+    if (this.host.machine.executionMode !== 'local' && this.resolved) await writeEnvironment(this.resolved, blocked)
   }
   restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
@@ -75,8 +83,10 @@ export class Setup {
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
-    const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    // Lazily construct the worker probe: unconfigured local deployments need no subprocess service.
+    const probe: ReturnType<Setup['probe']> = (argv, env) => this.probe()(argv, env)
+    const deployment = machine.executionMode === 'local' ? localDeployment(machine)
+      : await resolveDeployment(machine, settings.sources.github?.config, probe)
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
@@ -84,6 +94,7 @@ export class Setup {
       return undefined
     })
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    if (machine.executionMode === 'local') return resolved
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
