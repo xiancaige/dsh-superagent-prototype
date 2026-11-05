@@ -20,15 +20,18 @@ export interface VisualFrame {
   bytes?: number
 }
 export interface StrictVisual {
-  /** The worker's own verdict for the acceptance it performed. */
-  verdict: 'passed' | 'failed'
+  /**
+   * The worker's own verdict for the acceptance it performed. `undefined` only on a record persisted
+   * by the replaced host-contract model, which never recorded a conclusion.
+   */
+  verdict?: 'passed' | 'failed'
   /** Why, in the worker's words; required so a reader can check the reasoning. */
-  reason: string
+  reason?: string
   /** Frames the verdict was computed from; empty is allowed only for a `failed` verdict. */
-  frames: VisualFrame[]
+  frames?: VisualFrame[]
   /** Which worker/assignment recorded it. */
-  recordedBy: string
-  at: string
+  recordedBy?: string
+  at?: string
 }
 
 export interface StrictValidation {
@@ -52,6 +55,10 @@ export function validationBinding(ticket: Ticket): ValidationBinding {
 export function assertTicketVisualValidated(ticket: Ticket): void {
   const visual = ticket.validation?.visual
   if (!visual) return
+  // A record written before the worker-recorded model only holds a host contract and no verdict.
+  // Treat it as no visual requirement rather than as a failure: the old contract cannot be satisfied
+  // any more, so failing here would block a ticket that never recorded a conclusion (TODO72).
+  if (visual.verdict === undefined) return
   if (visual.verdict !== 'passed') throw new Error(`Visual acceptance was recorded as ${visual.verdict}: ${visual.reason}`)
 }
 export function assertTicketValidated(ticket: Ticket): void {
