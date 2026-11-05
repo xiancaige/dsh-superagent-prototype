@@ -56,6 +56,20 @@ describe('strict CQTest acceptance contract', () => {
     expect(fingerprintWorkspace(workspace)).not.toBe(before)
   })
 
+  it('does not move when top-level scratch output is rewritten while the host runs', () => {
+    const { workspace } = fixture()
+    mkdirSync(path.join(workspace, '.temp'), { recursive: true })
+    writeFileSync(path.join(workspace, '.temp', 'rag-startup.log'), 'line one\n')
+    const before = fingerprintWorkspace(workspace)
+    // The RAG service keeps appending to that log; a source fingerprint must not drift on its own.
+    writeFileSync(path.join(workspace, '.temp', 'rag-startup.log'), 'line one\nline two\n')
+    expect(fingerprintWorkspace(workspace)).toBe(before)
+    // A nested .temp is real source, exactly as a nested Saved is.
+    mkdirSync(path.join(workspace, 'nested', '.temp'), { recursive: true })
+    writeFileSync(path.join(workspace, 'nested', '.temp', 'keep.txt'), 'source')
+    expect(fingerprintWorkspace(workspace)).not.toBe(before)
+  })
+
   it('binds ticket, assignment, workspace and revision, including restored contracts', async () => {
     const { contract, binding, workspace } = fixture()
     const evidence = await import('../src/validation.ts').then(m => m.runValidation(contract, binding))
