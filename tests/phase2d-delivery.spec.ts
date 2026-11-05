@@ -15,6 +15,7 @@ import { environmentPort } from '../src/app/ticketed-environment.ts'
 import { Engine, MemoryRepositories, type Candidate, type EngineOptions, type Policy, type Repositories, type Ticket } from '../src/core/index.ts'
 import type { DeliveryAttempt, DeliveryLevel, DeliveryResult } from '../src/core/delivery.ts'
 import { ticketed } from './fixtures/environment.ts'
+import { CQTEST_PASSING_ID, writeCqtestReport } from './fixtures/cqtest-report.ts'
 
 const executable = execFileSync('python', ['-I', '-S', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
 const here = dirname(fileURLToPath(import.meta.url))
@@ -32,8 +33,8 @@ function directory(prefix = 'state') {
 }
 function workspace() {
   const root = directory('workspace')
-  writeFileSync(join(root, 'answer.py'), 'def answer():\n    return 42\n')
-  writeFileSync(join(root, 'test_delivery.py'), 'import unittest\nfrom answer import answer\nclass Delivery(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n')
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = () => 42\n')
+  writeCqtestReport(root)
   return root
 }
 function openStore(file: string) { const store = new Store(file); stores.add(store); return store }
@@ -78,16 +79,16 @@ function harness(input: { repo?: Repositories; directory?: string; state?: strin
     engine.assignmentStarted(id, assignment(id))
     return id
   }
-  const contract = { adapter: 'python-unittest' as const, executable, workspace: root,
-    requiredTestIds: ['test_delivery.Delivery.test_answer'], timeoutMs: 10_000 }
+  const contract = { adapter: 'cqtest-report' as const, executable, workspace: root,
+    requiredTestIds: [CQTEST_PASSING_ID], timeoutMs: 10_000 }
   async function strict(id: string) {
     engine.configureValidation(id, contract)
     return run(id)
   }
   async function run(id: string) {
     const evidence = await engine.runTicketTests(id, assignment(id))
-    expect(evidence).toMatchObject({ passed: true, completed: true, exitCode: 0, testsRun: 1, failures: 0, errors: 0, skipped: 0,
-      successfulTestIds: ['test_delivery.Delivery.test_answer'], binding: { ticketId: id, assignmentId: assignment(id), workspace: root } })
+    expect(evidence).toMatchObject({ passed: true, completed: true, testsRun: 1, failures: 0, errors: 0, skipped: 0,
+      successfulTestIds: [CQTEST_PASSING_ID], binding: { ticketId: id, assignmentId: assignment(id), workspace: root } })
     return evidence
   }
   const grant = (id: string, level: DeliveryLevel) => engine.configureDelivery(id, level, true, 'operator-alice')
@@ -236,7 +237,7 @@ describe('phase 2 D independent, version-bound delivery authorization', () => {
   it('rejects stale files without rerunning tests', async () => {
     const target = localTarget(), h = harness({ target }), id = h.accept()
     await h.strict(id); h.grant(id, 'release')
-    writeFileSync(join(h.root, 'answer.py'), 'def answer():\n    return -1\n')
+    writeFileSync(join(h.root, 'answer.ts'), 'export const answer = () => -1\n')
     refused(await h.deliver(id, 'release'), /stale|changed|fingerprint|acceptance|grant/i)
     expect(target.execute).not.toHaveBeenCalled()
   })
@@ -301,7 +302,7 @@ describe('phase 2 D independent, version-bound delivery authorization', () => {
       execFileSync('git', ['config', 'core.autocrlf', 'false'], { cwd: h.root })
       execFileSync('git', ['add', '.'], { cwd: h.root })
       execFileSync('git', ['-c', 'user.name=Delivery Test', '-c', 'user.email=delivery@example.invalid', 'commit', '-q', '-m', 'fixture'], { cwd: h.root })
-      writeFileSync(join(h.root, 'answer.py'), 'def answer():\n    return 42\n# uncommitted scene to preserve\n')
+      writeFileSync(join(h.root, 'answer.ts'), 'export const answer = () => 42\n// uncommitted scene to preserve\n')
       h.environment.directories.set(id, h.root)
     }
     await h.strict(id); h.grant(id, 'push')

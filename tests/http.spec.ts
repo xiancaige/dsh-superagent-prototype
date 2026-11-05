@@ -56,7 +56,7 @@ it('configures strict acceptance only through explicit management schema and exp
   const validation = { enabled: true as const, contract: { revision: 'r1' } }
   const call = serve({ store: { tickets: { get: (id: string) => id === 't1' ? { validation } : undefined } },
     engine: { configureValidation: (id: string, input: unknown) => { calls.push([id, input]); return { validation } } } })
-  const contract = { adapter: 'python-unittest', executable: 'C:/Python/python.exe', workspace: 'C:/work/t1', requiredTestIds: ['test_one.Suite.test_ok'] }
+  const contract = { adapter: 'cqtest-report', executable: 'C:/TP/BuildScripts/validate-cqtest-report.py', workspace: 'C:/work/t1', requiredTestIds: ['TP.Editor.UiDsl.ApplyGateRejectsNonPatchable'] }
   expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract })).toMatchObject({ status: 200, body: { validation } })
   expect(calls).toEqual([['t1', contract]])
   for (const body of [{ enabled: false }, { enabled: true, evidence: { passed: true } },
@@ -66,10 +66,10 @@ it('configures strict acceptance only through explicit management schema and exp
     expect(await call('PUT', 'tickets/t1/validation', body)).toMatchObject({ status: 400 })
   }
   expect(calls).toHaveLength(1)
-  const nodeContract = { ...contract, adapter: 'node-test', executable: 'C:/Node/node.exe', requiredTestIds: ['one.test.mjs::["test name"]'] }
-  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: nodeContract })).toMatchObject({ status: 200 })
-  expect(calls.at(-1)).toEqual(['t1', nodeContract])
-  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: { ...nodeContract, args: ['-e', ''] } })).toMatchObject({ status: 400 })
+  const otherContract = { ...contract, executable: 'C:/TP/BuildScripts/other-validator.py', requiredTestIds: ['TP.GAS.Smoke.Runs'] }
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: otherContract })).toMatchObject({ status: 200 })
+  expect(calls.at(-1)).toEqual(['t1', otherContract])
+  expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: { ...otherContract, args: ['-e', ''] } })).toMatchObject({ status: 400 })
   expect(await call('GET', 'tickets/t1/validation')).toMatchObject({ status: 200, body: { validation } })
   expect(await call('GET', 'tickets/missing/validation')).toMatchObject({ status: 404 })
   expect(await call('PUT', 'tickets/t1/validation', { enabled: true }, { 'x-orchestrator-request': undefined })).toMatchObject({ status: 403 })
