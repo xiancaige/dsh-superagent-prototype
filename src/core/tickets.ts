@@ -20,6 +20,13 @@ export const automatic = (input: TicketInput | undefined): boolean => input?.kin
 const readBefore = (input: Extract<TicketInput, { kind: 'trigger' }>, until: string): boolean => input.readAt === undefined
   ? (input.deliveredAt && input.deliveredAt > input.at ? input.deliveredAt : input.at) <= until : !!input.readAt && input.readAt < until
 const STATUS_REQUEST = 'Report the current ticket status with orchestrator_report. This is a status-only request: do not resume implementation or perform external actions.'
+/**
+ * Acceptance order for tickets accepted in the same millisecond: their creation times tie, and a wait for the environment
+ * must still go to the one accepted first. The first Assignment's ID ends in its index on the ticket, which is 0 for a first
+ * acceptance; a tie that leaves it off counts as the earliest.
+ */
+const acceptedFirst = (a: Ticket, b: Ticket): number =>
+  a.createdAt.localeCompare(b.createdAt) || (a.assignments[0]?.id ?? '').localeCompare(b.assignments[0]?.id ?? '')
 
 /**
  * Manages each ticket's lifecycle: creates the ticket for an accept decision with its Mandate, Subscriptions, and first
@@ -59,7 +66,8 @@ export class Tickets extends EnginePart {
     }
     const assignment = this.newAssignment(ticket)
     if (blocked) {
-      // The ticket is recorded and waits on a person; it gets no launch with a holder's environment.
+      // The ticket is recorded and waits for the environment, queued by the fact that another ticket holds it: it gets no
+      // launch now and no other ticket is displaced for it (see `resumeEnvironmentWaiter`).
       ticket.validation = { ...ticket.validation, enabled: true, blocked }
       this.repo.tickets.save(ticket)
       for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
@@ -73,6 +81,55 @@ export class Tickets extends EnginePart {
     this.options.executor.start(this.require(id), assignment)
     if (environments) this.emit('ticket.exclusive', { ticketId: id, action: 'acquired' })
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
+  }
+  /**
+   * Whether the environment is why a ticket waits: it was refused at acceptance and its first Assignment has not started,
+   * so the block is what queues it rather than a person's report, a design approval, or a failed launch.
+   */
+  private blockedForEnvironment(ticket: Ticket): boolean {
+    if (!ticket.validation?.blocked || ticket.assignments.length > 1) return false
+    const first = ticket.assignments[0]
+    return !!first && first.state === 'pending' && !first.startedAt
+  }
+  /**
+   * The ticket got the environment it was refused at acceptance (see `Tickets.create`): clear the block and start the
+   * Assignment that waited for it.
+   * @returns whether the ticket now runs; false when it is not waiting for the environment, waits for a person, or holds nothing.
+   */
+  resumeBlocked(ticketId: string): boolean {
+    const environments = this.environments()
+    if (!environments) return false
+    return this.repo.atomic(() => {
+      const ticket = this.require(ticketId)
+      if (!liveTicket(ticket) || !this.blockedForEnvironment(ticket) || waitsForPerson(ticket) || !environments.holds(ticketId)) return false
+      delete ticket.validation!.blocked
+      ticket.updatedAt = this.now()
+      this.repo.tickets.save(ticket)
+      this.options.executor.start(ticket, latestAssignment(ticket)!)
+      return true
+    })
+  }
+  /**
+   * After an environment release, hand it to the oldest ticket it kept waiting, in acceptance order. That ticket would have
+   * been launched at acceptance had the environment been free, and nothing else would tell it that the holder is gone: it
+   * takes the lease `create` would have taken and starts. A refusal, such as for a Session that took the free environment
+   * in the meantime, leaves every waiter waiting; the next release asks again. No other ticket is displaced for a waiter.
+   * @returns the ID of the ticket that now runs, if one did.
+   */
+  resumeEnvironmentWaiter(): string | undefined {
+    const environments = this.environments()
+    if (!environments) return undefined
+    const waiting = this.repo.tickets.open().filter(ticket => this.blockedForEnvironment(ticket) && !waitsForPerson(ticket))
+      .sort(acceptedFirst)[0]
+    if (!waiting) return undefined
+    try {
+      this.repo.atomic(() => environments.acquire(waiting.id, waiting.title))
+    } catch (error) {
+      this.emit('ticket.exclusive', { ticketId: waiting.id, action: 'refused', reason: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
+    this.emit('ticket.exclusive', { ticketId: waiting.id, action: 'acquired' })
+    return this.resumeBlocked(waiting.id) ? waiting.id : undefined
   }
   /**
    * Subscribes an open ticket to `thread` and records it in `ticket.follows` (`own` when opened by the ticket).
@@ -414,8 +471,9 @@ export class Tickets extends EnginePart {
   private endEnvironment(ticketId: string, ended: { by: TicketEndBy; outcome: TicketOutcome }, acceptancePassed = false): void {
     const environments = this.environments()
     if (!environments?.end) return
-    void environments.end(ticketId, ended, acceptancePassed).catch(error => this.emit('ticket.handover', { ticketId, handedOver: false,
-      error: `The environment release failed: ${error instanceof Error ? error.message : String(error)}` }))
+    void environments.end(ticketId, ended, acceptancePassed).then(released => { if (released) this.resumeEnvironmentWaiter() },
+      error => this.emit('ticket.handover', { ticketId, handedOver: false,
+        error: `The environment release failed: ${error instanceof Error ? error.message : String(error)}` }))
   }
   /**
    * Whether a ticket's work has not finished at a close at `at`: its worker took up a person's message the ticket decides and
