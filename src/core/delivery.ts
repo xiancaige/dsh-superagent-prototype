@@ -4,10 +4,10 @@
  * This is a workflow boundary, not an OS sandbox against code running as the host user.
  */
 import { createHash } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { realpathSync } from 'node:fs'
 import { fingerprintWorkspace } from '../validation.ts'
-import { validateVisualEvidence } from '../visual-host.ts'
-import type { VisualContract, VisualEvidence } from '../visual-host.ts'
 import { assertTicketValidated } from './validation.ts'
 import { latestAssignment, type Ticket } from './model.ts'
 import { EnginePart } from './part.ts'
@@ -135,12 +135,17 @@ export class Deliveries extends EnginePart {
             }
           }
           fresh(ticket.validation.evidence.finishedAt)
+          // Visual acceptance is the worker's recorded conclusion; a delivery requires it to say
+          // `passed` and its frames to still be on disk (a changed frame voids the conclusion).
           const visual = ticket.validation.visual
           if (visual) {
-            if (!visual.contract || !visual.evidence || !workspace) throw new Error('missing visual contract/evidence')
-            fresh(visual.evidence.finishedAt)
-            const checked = validateVisualEvidence(visual.contract as VisualContract, workspace, visual.evidence as VisualEvidence, ticket.id, assignmentId)
-            if (!checked.valid) throw new Error(checked.reasons.join('; '))
+            if (visual.verdict !== 'passed') throw new Error(`visual acceptance recorded as ${visual.verdict}`)
+            for (const frame of visual.frames) {
+              const filename = isAbsolute(frame.path) ? frame.path : join(workspace!, frame.path)
+              if (!existsSync(filename) || createHash('sha256').update(readFileSync(filename)).digest('hex') !== frame.sha256) {
+                throw new Error(`visual evidence frame ${frame.path} no longer matches its sha256`)
+              }
+            }
           }
         } catch (error) { reasons.push(`Delivery: acceptance invalid: ${String(error)}`) }
       }

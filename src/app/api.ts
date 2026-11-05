@@ -44,10 +44,8 @@ export interface Api {
   'GET tickets/:id/review': { response: { review: import('../core/review.ts').IndependentReview | null } }
   'PUT tickets/:id/review': { body: import('../core/review.ts').ReviewConfiguration; response: { review: import('../core/review.ts').IndependentReview } }
   'POST tickets/:id/review': { body: import('../core/review.ts').ReviewDecisionInput; response: { review: import('../core/review.ts').IndependentReview } }
-  'PUT tickets/:id/validation': { body: { enabled: true; contract?: Omit<import('../validation.ts').ValidationContractInput, 'revision'>; visual?: import('../visual-contract.ts').VisualContractInput }; response: { validation: import('../core/validation.ts').StrictValidation } }
+  'PUT tickets/:id/validation': { body: { enabled: true; contract?: Omit<import('../validation.ts').ValidationContractInput, 'revision'> }; response: { validation: import('../core/validation.ts').StrictValidation } }
   'GET tickets/:id/validation': { response: { validation: import('../core/validation.ts').StrictValidation | null } }
-  'PUT tickets/:id/validation/visual': { body: import('../visual-contract.ts').VisualContractInput; response: { validation: import('../core/validation.ts').StrictValidation | null } }
-  'POST tickets/:id/validation/visual/prepare': { response: { prepared: true } }
   'POST tickets/:id/retry': { response: { retried: true } }
   'POST tickets/:id/stop': { response: { stopped: true } }
   'GET tickets/:id/delivery': { response: import('../core/delivery.ts').DeliveryState }
