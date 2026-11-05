@@ -14,7 +14,7 @@ export interface ExecutorToolsHost {
   /** Absent by default; do not advertise an unconfigured delivery target to workers. */
   readonly deliveryEnabled?: boolean
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'> & Partial<Pick<EngineForExecutor,
-    'runTicketTests' | 'captureVisual' | 'readVisual' | 'deliverTicket'>>
+    'runTicketTests' | 'recordVisual' | 'deliverTicket'>>
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly lifetime?: AbortSignal
@@ -43,24 +43,19 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       },
     }),
     tool({
-      name: 'orchestrator_capture_visual',
-      description: 'Ask the host to capture the fixed visual scenario with the trusted capture tool. Only a group name and a frame count within the contract are accepted; the host writes and records the frames, and a capture never passes a check by itself.',
+      name: 'orchestrator_record_visual',
+      description: 'Record the visual acceptance you performed. Capture with the project editor’s own screenshot tool and read the frames yourself; the host does not capture or judge. It stores your verdict and verifies each frame still hashes to what you reported.',
       schema: z.object({
-        group: z.string().min(1).max(64).describe('A short path-safe name for this capture group; a group is captured once.'),
-        frames: z.number().int().min(1).max(20).optional().describe('How many frames to capture, at most the contract minimum; 1 by default.'),
+        verdict: z.enum(['passed', 'failed']).describe('Your verdict.'),
+        reason: z.string().min(1).max(2000).describe('Why, checkable against the frames.'),
+        frames: z.array(z.object({
+          path: z.string().min(1).describe('Frame path, workspace-relative or absolute.'),
+          sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).describe('sha256 of the file you read.'),
+        }).strict()).max(20).describe('Frames judged; a pass needs one.'),
       }).strict(),
-      execute: async (args, signal) => {
-        if (!host.engine.captureVisual) throw new Error('Visual capture runner unavailable')
-        return host.engine.captureVisual(ticketId, runningAssignment(), args.group, args.frames ?? 1, combined(signal))
-      },
-    }),
-    tool({
-      name: 'orchestrator_read_visual',
-      description: 'Ask the host image inspector to read the captured frames and record a verdict for every contract check. Nothing the worker supplies can certify a check.',
-      schema: z.object({}).strict(),
-      execute: async (_args, signal) => {
-        if (!host.engine.readVisual) throw new Error('Visual inspector runner unavailable')
-        return host.engine.readVisual(ticketId, runningAssignment(), combined(signal))
+      execute: async (args, _signal) => {
+        if (!host.engine.recordVisual) throw new Error('Visual recording unavailable')
+        return host.engine.recordVisual(ticketId, runningAssignment(), args)
       },
     }),
     ...host.deliveryEnabled ? [tool({

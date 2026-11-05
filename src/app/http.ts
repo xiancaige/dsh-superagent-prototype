@@ -147,15 +147,6 @@ type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
-/** Phase B visual contract: fixed scenario, fixed capture tool, host-trusted inspector and named checks. */
-const VisualContractRequest = z.object({
-  scenario: z.string().min(1),
-  capture: z.object({ server: z.string().min(1), tool: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
-    timeoutMs: z.number().int().positive().max(300_000).optional() }).strict(),
-  inspector: z.object({ executable: z.string().min(1), args: z.array(z.string()).optional() }).strict(),
-  checks: z.array(z.string().min(1)).min(1),
-  minimumFrames: z.number().int().min(1).max(20),
-}).strict()
 const ThreadsQuery = z.object({ filter: z.enum(THREAD_FILTERS).catch('subscribed'), offset, limit: limit(20, 1000) })
 const ThreadQuery = z.object({ limit: limit(50, 100), before: z.string().optional(), around: z.string().optional() })
 const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.literal('24h').optional().catch(undefined), offset,
@@ -241,21 +232,9 @@ function routes(runtime: HttpHost): Routes {
       const input = z.object({ enabled: z.literal(true), contract: z.object({
         adapter: z.enum(['python-unittest', 'node-test', 'cqtest-report']), executable: z.string().min(1), workspace: z.string().min(1),
         requiredTestIds: z.array(z.string().min(1)).min(1), timeoutMs: z.number().int().positive().max(600_000).optional(),
-      }).strict().optional(), visual: VisualContractRequest.optional() }).strict().parse(await body())
+      }).strict().optional() }).strict().parse(await body())
       const updated = runtime.engine.configureValidation(ticket(params.id), input.contract)
-      // Phase B shares the opt-in: a visual contract is configured only on a ticket that has it.
-      if (input.visual) runtime.engine.configureVisual(ticket(params.id), input.visual)
       return { validation: updated.validation! }
-    },
-    'PUT tickets/:id/validation/visual': async ({ params, body }) => {
-      const input = VisualContractRequest.parse(await body())
-      runtime.engine.configureVisual(ticket(params.id), input)
-      return { validation: store.tickets.get(ticket(params.id))!.validation ?? null }
-    },
-    'POST tickets/:id/validation/visual/prepare': ({ params }) => {
-      const id = ticket(params.id)
-      runtime.engine.prepareVisualCapture(id)
-      return { prepared: true }
     },
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },

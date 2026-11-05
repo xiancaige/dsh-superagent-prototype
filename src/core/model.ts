@@ -305,6 +305,11 @@ export interface Ticket {
   execution?: Execution
   /** Trusted host-managed opt-in acceptance; serialized with the ticket across restarts. */
   validation?: import('./validation.ts').StrictValidation
+  /**
+   * The ticket's one TP editor recovery (started because an editor endpoint was unreachable). Kept
+   * on the ticket so a restart cannot grant a second attempt; independent of visual acceptance.
+   */
+  editorRecovery?: { attempts: number; outcome?: unknown; startedPid?: number }
   /** Independent operator-attested review, opt-in independently of strict tests; persisted with the ticket. */
   review?: import('./review.ts').IndependentReview
   /** Trusted opt-in design scope/document confirmation, independent of whole-workspace review. */

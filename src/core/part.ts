@@ -5,7 +5,6 @@ import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
 import { assertTicketValidated } from './validation.ts'
 import type { AcceptanceFacts, Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Environments, Executor, Outbox, Policy, Repositories,
   SourceScope } from './ports.ts'
-import type { CaptureBinding, CaptureOutcome, SettledReport, VisualContract, VisualEvidence } from '../visual-host.ts'
 
 
 export interface EngineOptions {
@@ -16,11 +15,6 @@ export interface EngineOptions {
   assessor: Assessor
   executor: Executor
   outbox: Outbox
-  /**
-   * Phase B host-side visual adapter: captures frames only through the fixed trusted tool and judges
-   * them only by reading them with the fixed inspector. Omitted, visual acceptance is unavailable.
-   */
-  visualCapture?: VisualCapture
   /** Explicit trusted adapter. Absent by default: no command or real channel is assumed. */
   deliveryTarget?: import('./delivery.ts').DeliveryTarget
   /**
@@ -33,14 +27,6 @@ export interface EngineOptions {
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string
   emit?: (event: DomainEvent) => void
-}
-
-/** What the Engine asks of the host visual adapter. Neither method may accept worker-supplied evidence. */
-export interface VisualCapture {
-  capture(binding: CaptureBinding, count: number, prepared: { at: string } | undefined, signal: AbortSignal): Promise<CaptureOutcome>
-  /** `settled` is every report this ticket already decided, which a new report may not contradict. */
-  assess(contract: VisualContract, ticketId: string, assignmentId: string, workspace: string, signal: AbortSignal,
-    settled?: readonly SettledReport[]): Promise<VisualEvidence>
 }
 
 /**
