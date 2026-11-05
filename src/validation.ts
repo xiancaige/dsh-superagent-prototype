@@ -79,11 +79,16 @@ const generatedDirectories = new Set(['.git', 'node_modules', '__pycache__', '.p
 // Unreal's own build/run output. Top-level only, and only when the root holds a .uproject: a CQTest run writes Saved/Intermediate/Binaries
 // (GBs of PCH/PDB and rolling logs), which would make any fingerprint of a UE worktree unreadable (>2 GiB files) or never stable.
 const unrealGeneratedDirectories = new Set(['Saved', 'Intermediate', 'Binaries', 'DerivedDataCache', '.vs'])
+// Top-level scratch output that is gitignored and rewritten while the host runs (the project's one-off scripts and
+// the RAG service's rolling log). Counting it made the fingerprint move on its own, so a freshly taken acceptance
+// evidence went stale without anyone editing source (TODO72, verified 2026-11-05).
+const scratchDirectories = new Set(['.temp'])
 function isUnrealProject(root: string): boolean {
   try { return readdirSync(root).some(name => name.toLowerCase().endsWith('.uproject')) } catch { return false }
 }
 function generated(relative: string, name: string, directory: boolean, unreal = false): boolean {
-  return directory && (generatedDirectories.has(name) || relative === '.dsh/home' || unreal && unrealGeneratedDirectories.has(relative))
+  return directory && (generatedDirectories.has(name) || relative === '.dsh/home' || scratchDirectories.has(relative)
+      || unreal && unrealGeneratedDirectories.has(relative))
     || !directory && (name === '.coverage' || name.startsWith('.coverage.'))
 }
 
