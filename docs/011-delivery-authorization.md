@@ -18,7 +18,7 @@ D 只增加交付授权与持久副作用账本，不修改 C 生命周期，不
 - `push` / `release` 必须由本 ticket **当前持有**环境独占。没有环境 port、已交接、他人持有均拒绝；执行入口不自动重新取锁，也不以历史验收或 completed 代替 `holds`。
 - 拒绝写入持久 refusal 事实，返回具体原因；无权 release 不静默降级为 commit。
 
-验收复用：[strict binding/gate](<../src/core/validation.ts>)、[真实 unittest 与内容指纹](<../src/validation.ts>)、[视觉证据验证](<../src/visual-host.ts>)。不能把报告文本或 worker 提交的“通过 JSON”当成证据。
+验收复用：[strict binding/gate](<../src/core/validation.ts>)、[真实 unittest 与内容指纹](<../src/validation.ts>)、[视觉结论与帧摘要](<../src/core/validation.ts>)。不能把报告文本或 worker 提交的“通过 JSON”当成证据。
 
 ## 已实现接线与开发时序
 
@@ -61,7 +61,7 @@ Target 的 `version(workspace)` 必须代表确切、不可变的交付内容。
 | 审查 | 部分覆盖（可选独立签核门） | [review](<../src/core/review.ts>) 配置实施者/审查者，管理端代录判决；拒自签、缺签、驳回、版本或 assignment 变化，完成/result/各级交付共用检查。见 `012-independent-review.md`。身份为受信 operator 声明，非 OS 认证；不自动证明审查质量。 |
 | 编译 | 未覆盖（UE） | [validation adapter](<../src/validation.ts#L98-L121>) 接受显式配置的 `python-unittest` 与 `node-test`；[编辑器恢复](<../src/app/editor-recovery.ts#L458-L512>) 的启动/握手不是 UE 编译。**UE C++ 编译及编译结果验收未覆盖**。 |
 | 测试 | 部分覆盖 | [validation](<../src/validation.ts>) 运行真实 Python unittest 或 Node 内置 node:test，并校验必需用例、退出状态及版本绑定（不解析 stdout 伪成功）；[strict gate](<../src/core/validation.ts>) 将证据接入验收。**CQTest runner、Gauntlet 与 UE 测试报告适配未覆盖**。 |
-| 视觉 | 部分覆盖 | [Engine.captureVisual/readVisual](<../src/core/engine.ts>) 使用 host capture 与独立 inspector；[visual-host](<../src/visual-host.ts>) 检查证据。需可信工具/配置与真实可用环境；不能把通用视觉合同当成所有 UE 场景均已验收。 |
+| 视觉 | 部分覆盖 | 截图与读图由 worker 用项目编辑器自带工具完成，[Engine.recordVisual](<../src/core/engine.ts>) 只记录结论并校验每帧 sha256；宿主不再代截图、不托管 inspector。**不替代人工对画面语义的判断**。 |
 | 返工 | 已覆盖（工单协议） | [Tickets.retry](<../src/core/tickets.ts#L200-L211>) 结束 stalled assignment、建立新 assignment；[strict binding](<../src/core/validation.ts>) 阻止沿用其他 assignment 的证据。交接后重做仍须重新获取独占，delivery 不代取。 |
 | 恢复 | 部分覆盖 | [编辑器 recover](<../src/app/editor-recovery.ts#L458-L516>) 限制恢复次数，核验进程/端口与握手；[runtime lease 恢复](<../src/app/runtime.ts#L338-L355>) 恢复 live ticket；D 账本防重复 dispatch。不是通用所有副作用的自动恢复；下述 C completion 风险为历史记录，修复见 C+D 综合验收补充。 |
 | 交付 | 部分覆盖 | [Deliveries](<../src/core/delivery.ts>) 提供独立授权、共享 gate、持久拒绝与 at-most-once 预留；仅显式注入 trusted target。真实 push、PR、打包/上传/正式发布 adapter 及其目标侧 receipt reconcile 集成未覆盖。 |
