@@ -61,6 +61,11 @@ declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceH
  */
 export interface TicketEndedNotice {
   ticketId: string
+  /**
+   * The worker Session that ran the ticket (`worker-<ticketId>`). A listener that means to learn from the end reads the
+   * session through the host's own session query, so the notice carries the reference and not a copy of the history.
+   */
+  sessionId: string
   /** Who ended it: its Executor, or a person (`stopped` only ends this way). */
   by: TicketEndBy
   outcome: TicketOutcome
@@ -336,7 +341,8 @@ export class Runtime extends Service implements SourceHost {
           // as an event's data already is.
           if (event.type === 'ticket.ended') {
             const { ticketId, by, outcome, reason } = event.data
-            const notice: TicketEndedNotice = { ticketId, by, outcome, ...reason ? { reason } : {}, at: event.at }
+            const notice: TicketEndedNotice = { ticketId, sessionId: workerSessionId(ticketId), by, outcome,
+              ...reason ? { reason } : {}, at: event.at }
             setImmediate(() => publishTicketEnded(ctx, notice))
           }
         } })
