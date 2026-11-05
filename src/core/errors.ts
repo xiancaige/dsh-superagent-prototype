@@ -44,6 +44,9 @@ export const USER_ERRORS = {
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
+  noEnvironment: ['refused', 'This deployment has no shared environment a ticket holds; there is nothing to hand over'],
+  ticketLive: ['refused', 'This ticket is still running; hand its environment over or stop it instead'],
+  notHolding: ['refused', 'This ticket does not hold the shared environment'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

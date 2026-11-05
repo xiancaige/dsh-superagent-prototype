@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type TicketEndBy, type TicketOutcome, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -46,10 +46,76 @@ import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import { DEFAULT_VISUAL_ENDPOINT, HostVisualCapture, type VisualCaptureSettings } from './visual-capture.ts'
+import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } from './editor-recovery.ts'
+import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
+import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
+import { SimulatedDelivery } from './simulated-delivery.ts'
+import { exclusivityPort, RECOVERY_HOLDER_PREFIX } from './editor-recovery-lease.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
+/**
+ * What `console/ticket-ended` carries to other plugins: the end of one authorized unit of work, after its completion gate
+ * passed. It is a notice, never a decision: a listener may archive, summarize or forget, and none of it can hold the ticket
+ * open, change its outcome or grant anything. Only `outcome: 'completed'` reached `assertTicketValidated`.
+ */
+export interface TicketEndedNotice {
+  ticketId: string
+  /** Who ended it: its Executor, or a person (`stopped` only ends this way). */
+  by: TicketEndBy
+  outcome: TicketOutcome
+  /** Why, when the end carries a reason distinct from its outcome. */
+  reason?: string
+  at: string
+}
+// The one event dsh-superagent publishes outside itself, so a plugin can follow its work without reading its store.
+// Declared on the host's global events, as cordis resolves listeners by that name (`ctx.on('console/ticket-ended', ...)`).
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'console/ticket-ended': (notice: TicketEndedNotice) => void
+  }
+}
+/**
+ * Runs every `console/ticket-ended` listener and reports the ones that failed, without letting one stop the others.
+ *
+ * cordis `emit` calls listeners in order and stops at the first throw, so a plugin whose listener misbehaves would hide the
+ * end of a unit of work from every plugin registered after it. `parallel` settles all of them and throws one aggregate; a
+ * listener that meaningfully takes longer than its neighbors still cannot hold the ticket, since nothing awaits this.
+ */
+export async function publishTicketEnded(ctx: Context, notice: TicketEndedNotice): Promise<void> {
+  try { await ctx.parallel('console/ticket-ended', notice) }
+  catch (error) {
+    const failures = error instanceof AggregateError ? error.errors : [error]
+    ctx.logger.warn('dsh-superagent: %d console/ticket-ended listener(s) failed for ticket %s: %s',
+      failures.length, notice.ticketId, failures.map(reason => String(reason)).join('; '))
+  }
+}
 const now = (): string => new Date().toISOString()
+/** How long a hard-restart's own fresh heartbeat lock is waited for before giving up. */
+const LOCK_WAIT_MS = 40_000
+/**
+ * Takes the state directory lock, waiting out a fresh one a hard host restart left behind (it expires on its
+ * own; it is never stolen). Waiting belongs here rather than in a retry of the whole constructor: `super()`
+ * has already registered the `orchestrator` service, and cordis refuses a second registration.
+ */
+function acquireStateLock(stateDir: string, onCompromised: (error: Error) => void): () => void {
+  // `lockSync` refuses `retries` ("Cannot use retries with the sync api"), so a short synchronous sleep between
+  // attempts is the only waiting this synchronous constructor can do. It is bounded and never steals the lock.
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try { return lockSync(stateDir, { stale: 30_000, onCompromised }) }
+    catch (error) {
+      if ((error as { code?: string })?.code !== 'ELOCKED' || Date.now() >= deadline) throw error
+      sleepSync(1_000)
+    }
+  }
+}
+/** Sleeps without yielding, for a synchronous startup path that must wait for a lock it may not steal. */
+function sleepSync(ms: number): void {
+  const until = Date.now() + ms
+  while (Date.now() < until) { /* bounded busy wait; startup only, at most LOCK_WAIT_MS in total. */ }
+}
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -82,15 +148,124 @@ export class Runtime extends Service implements SourceHost {
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  /** Phase 2 C: the TP environment broker and its ticket side; undefined without a configured TP environment. */
+  private readonly environmentHosted?: { broker: EnvironmentExclusivity; tickets: TicketedEnvironment }
+  /** The B2 recovery adapter, shared so the host can stop exactly the editor a recovery started. */
+  private editorRecovery?: TpEditorRecovery
+  /** Phase 2 C: the lease heartbeat of the tickets that hold the environment. */
+  private environmentTimer?: ReturnType<typeof setInterval>
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
+  /**
+   * The real capture transport this deployment uses. Unset means the project's editor MCP endpoint;
+   * an operator override names either that endpoint (`DSH_SUPERAGENT_VISUAL_ENDPOINT`) or a local MCP
+   * capture server for deployments with no editor (`DSH_SUPERAGENT_VISUAL_COMMAND`).
+   */
+  private visualSettings(): VisualCaptureSettings {
+    const command = process.env.DSH_SUPERAGENT_VISUAL_COMMAND
+    if (command) return { transport: 'stdio', command, args: (process.env.DSH_SUPERAGENT_VISUAL_ARGS ?? '').split(' ').filter(Boolean) }
+    return { transport: 'streamable-http', endpoint: process.env.DSH_SUPERAGENT_VISUAL_ENDPOINT ?? DEFAULT_VISUAL_ENDPOINT }
+  }
+  /**
+   * Phase B2 editor recovery. Off unless the rollout configures it (`environment.recoveryEnabled` in
+   * the profile patch, or `DSH_SUPERAGENT_EDITOR_RECOVERY=1` on a deployment configured by hand), and
+   * then it acts only on the absolute TP project and editor it names, never on another UE project. The
+   * capture tool is the one the deployment already expects, so readiness without it is an environment
+   * block. The rollout's values win over the process environment, so the repository is the desired state.
+   */
+  private recoverySettings(): RecoverySettings {
+    const configured = this.machine.environment
+    if (configured?.recoveryEnabled === true) {
+      // setup-superagent.mjs already refused a section whose paths are missing or relative; a hand-edited
+      // patch that enables the environment without them is a startup error, never a silent disable.
+      const missing = (['projectFile', 'editorExe'] as const).filter(key => !configured[key]?.trim())
+      if (missing.length) throw new Error(`dsh-superagent environment.recoveryEnabled is true but ${missing.join(' and ')} is not set; the rollout block must name the absolute TP project and editor`)
+      const environment: TpEditorEnvironment = {
+        projectFile: configured.projectFile!, editorExe: configured.editorExe!, port: configured.mcpPort,
+        captureTool: configured.captureTool, captureToolset: configured.captureToolset,
+        ...configured.waitSeconds !== undefined ? { waitSeconds: configured.waitSeconds } : {},
+      }
+      return { enabled: true, environment }
+    }
+    // A rollout section that exists but disables recovery means no environment at all: the process
+    // environment is not allowed to re-enable what the repository switched off.
+    if (configured) return { enabled: false }
+    if (process.env.DSH_SUPERAGENT_EDITOR_RECOVERY !== '1') return { enabled: false }
+    const projectFile = process.env.DSH_SUPERAGENT_TP_PROJECT
+    const editorExe = process.env.DSH_SUPERAGENT_TP_EDITOR_EXE
+    if (!projectFile || !editorExe) return { enabled: false }
+    const environment: TpEditorEnvironment = {
+      projectFile, editorExe,
+      port: Number(process.env.DSH_SUPERAGENT_TP_MCP_PORT ?? 55255),
+      captureTool: process.env.DSH_SUPERAGENT_TP_CAPTURE_TOOL ?? 'CaptureWidgetBlueprintScreenshot',
+      // TPMcp's tools/list shows only its dispatcher; the capture tool lives in this toolset.
+      captureToolset: process.env.DSH_SUPERAGENT_TP_CAPTURE_TOOLSET ?? 'TPEditor.TPEditorToolset',
+      ...(process.env.DSH_SUPERAGENT_TP_WAIT_SECONDS ? { waitSeconds: Number(process.env.DSH_SUPERAGENT_TP_WAIT_SECONDS) } : {}),
+    }
+    return { enabled: true, environment }
+  }
+  /**
+   * Phase 2 C: the one TP environment broker, that is: the same `tp-environment.lock` B2 wrote, now a persisted
+   * lease for the whole span a ticket changes the TP environment; plus the ticket side that takes it at
+   * acceptance, beats it, hands it over and releases it. Absent without a configured TP environment.
+   */
+  private environmentHost(): { broker: EnvironmentExclusivity; tickets: TicketedEnvironment } | undefined {
+    const environment = this.recoverySettings().environment
+    if (!environment) return undefined
+    const broker = new EnvironmentExclusivity(this.machine.stateDir)
+    const tickets = new TicketedEnvironment(broker, { projectFile: environment.projectFile, port: environment.port }, {
+      stopEditor: ticketId => this.stopTicketEditor(ticketId, environment),
+      ownsEditor: ticketId => !!this.editorRecovery?.owns(ticketId),
+      directory: ticketId => this.store.tickets.get(ticketId)?.execution?.directory,
+    })
+    return { broker, tickets }
+  }
+  /** The recovery adapter for one ticket, when the operator enabled it; undefined keeps an unreachable editor `unavailable`. */
+  private recovery(store: Store): { adapter: TpEditorRecovery; record(ticketId: string): { prior: unknown; save(prior: unknown, outcome: unknown): void } } | undefined {
+    if (!this.recoverySettings().enabled) return undefined
+    const environment = this.environmentHosted
+    const adapter = new TpEditorRecovery(() => this.recoverySettings(), {
+      // The recovery borrows the one environment lock; it never writes a second and never takes a held one.
+      ...environment ? {
+        port: exclusivityPort(environment.broker),
+        recordStarted: (ticketId: string, pid: number, startedAt?: string) => environment.tickets.recordStarted(ticketId, pid, startedAt),
+        recordedPid: (ticketId: string) => environment.tickets.recordedPid(ticketId),
+        recordedStart: (ticketId: string) => environment.tickets.recordedStart(ticketId),
+      } : {},
+    }, this.machine.stateDir)
+    this.editorRecovery = adapter
+    return {
+      adapter,
+      // The ticket's one recovery chance is persisted with the ticket: a restart cannot grant a second.
+      record: (ticketId: string) => ({
+        prior: store.tickets.get(ticketId)?.validation?.visual?.recovery,
+        save: (_prior: unknown, outcome: unknown) => {
+          store.atomic(() => {
+            const ticket = store.tickets.get(ticketId)
+            const visual = ticket?.validation?.visual
+            if (!visual) return
+            const result = outcome as { kind: string; reason: string; pid?: number; startedPid?: number; sessionId?: string; tools?: readonly string[]; portListened?: boolean; at: string }
+            const attempts = (store.tickets.get(ticketId)?.validation?.visual?.recovery?.attempts ?? 0) + 1
+            visual.recovery = { attempts, outcome: result, ...(result.startedPid ? { startedPid: result.startedPid } : {}) }
+            // An environment block is what the contract reports instead of "test failure".
+            if (result.kind === 'unavailable') visual.blocked = `TP editor environment block: ${result.reason}`
+            else delete visual.blocked
+            store.tickets.save(ticket!)
+          })
+        },
+      }),
+    }
+  }
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
     super(ctx, 'orchestrator')
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
-    const release = lockSync(machine.stateDir, { stale: 30_000, onCompromised: compromised })
+    // A hard host restart can leave a fresh heartbeat lock that expires on its own: wait for it here rather than
+    // steal it. Retrying the whole constructor is not an option, because `super()` already registered the
+    // `orchestrator` service and cordis would refuse the second registration.
+    const release = acquireStateLock(machine.stateDir, compromised)
     this.releaseLock = async () => { release() }
     let opened: Store | undefined
     try {
@@ -134,8 +309,20 @@ export class Runtime extends Service implements SourceHost {
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+      // Phase B: the host visual adapter is the only path to a frame; the deployment names its transport.
+      // Phase B2: an unreachable editor endpoint is recovered first, when the operator enabled it.
+      // Phase 2 C: the environment is composed before the recovery, which borrows its one lock.
+      this.environmentHosted = this.environmentHost()
+      const recovery = this.recovery(store)
+      const visual = new HostVisualCapture({ settings: () => this.visualSettings(), statePath: () => join(machine.stateDir, 'visual-tool'),
+        ...(recovery ? { recovery: () => recovery.adapter, recoveryRecord: (ticketId: string) => recovery.record(ticketId) } : {}) }, machine)
+      const environments = environmentPort(this.environmentHosted?.tickets)
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, visualCapture: visual,
+        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
+        ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'
+          ? { deliveryTarget: new SimulatedDelivery(join(machine.stateDir, 'delivery-simulation')) } : {},
+        ...environments ? { environments, acceptance: ticket => this.acceptancePassed(ticket) } : {}, emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -146,9 +333,30 @@ export class Runtime extends Service implements SourceHost {
           if (followup) sessions.relay(followup.id, followup.text)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
+          // Phase B2: a TP editor this ticket's recovery started is stopped with the ticket, so no
+          // unattended editor is left behind. Only a PID this host started is ever stopped.
+          // With an environment, the ticket's own release stops the editor first and keeps the lock on a failure.
+          if (event.type === 'ticket.ended' && recovery && !this.environmentHosted) {
+            const environment = this.recoverySettings().environment
+            if (environment) void recovery.adapter.cleanup(event.data.ticketId, environment)
+              .catch(error => ctx.logger.warn('dsh-superagent: TP editor cleanup failed: %s', String(error)))
+          }
+          // Phase 2 C: a ticket that took the environment notes it, so an operator sees who holds it.
+          if (event.type === 'ticket.exclusive' && event.data.action === 'refused') {
+            ctx.logger.warn('dsh-superagent: ticket %s did not get the TP environment: %s', event.data.ticketId, String(event.data.reason))
+          }
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+          }
+          // Publish the end of a unit of work to other plugins, so one can archive or summarize it without reading the
+          // store. This runs inside the engine's transaction, so it only hands the notice to a later macrotask: a listener
+          // that takes minutes must never hold the ticket's end open. The notice is a copy, not the stored ticket, exactly
+          // as an event's data already is.
+          if (event.type === 'ticket.ended') {
+            const { ticketId, by, outcome, reason } = event.data
+            const notice: TicketEndedNotice = { ticketId, by, outcome, ...reason ? { reason } : {}, at: event.at }
+            setImmediate(() => publishTicketEnded(ctx, notice))
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -159,7 +367,8 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, lifetime: this.lifetime,
+        deliveryEnabled: process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1',
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -214,21 +423,93 @@ export class Runtime extends Service implements SourceHost {
     this.executor.resume()
     this.passes.start()
     this.effects.start()
+    // Phase 2 C: a restarted host keeps the ticket that holds the environment: its persisted lease is
+    // re-taken by this process and beaten, so waiting, idling and restarting never free it.
+    this.environmentHosted?.broker.wake()
+    this.resumeEnvironment()
+    // A delivery attempt left running by the stopped host is unknown, not safe to resend.
+    this.engine.recoverDeliveries()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+  }
+  /** Re-take the leases the host's tickets already hold (see `TicketedEnvironment.acquire`) and beat them. */
+  private resumeEnvironment(): void {
+    const environment = this.environmentHosted
+    if (!environment) return
+    const { broker, tickets } = environment
+    // A record whose Session process is gone (a crashed host) no longer holds anything; a live one does.
+    const record = broker.held()
+    if (record) {
+      const ticket = this.store.tickets.get(record.holder.id)
+      if (record.holder.kind === 'ticket' && ticket && liveTicket(ticket)) {
+        try { tickets.acquire(ticket.id, ticket.title) } catch (error) {
+          this.ctx.logger.warn('dsh-superagent: ticket %s could not resume its TP environment lease: %s', ticket.id, String(error))
+        }
+      } else if (record.holder.kind === 'ticket' && ticket?.ended && record.facts?.purpose === 'delivery') {
+        // An operator took the environment again so this completed ticket can deliver: resume it, release it on neither a
+        // restart nor a heartbeat, only through the same release facts as any other holder.
+        try { tickets.acquire(ticket.id, ticket.title) } catch (error) {
+          this.ctx.logger.warn('dsh-superagent: ticket %s could not resume its delivery lease: %s', ticket.id, String(error))
+        }
+      } else if (record.holder.kind === 'ticket' && ticket?.ended) {
+        // The ticket ended but its release did not finish (its editor could not be stopped, or the host stopped meanwhile):
+        // take the handle back and finish the release now, which stops the editor first and keeps the lock on a failure.
+        const ended = ticket.ended
+        void (async () => {
+          try {
+            tickets.acquire(ticket.id, ticket.title)
+            await tickets.end(ticket.id, { by: ended.by, outcome: ended.outcome }, ended.outcome === 'completed')
+          } catch (error) {
+            this.ctx.logger.warn('dsh-superagent: ticket %s could not finish releasing its TP environment: %s', ticket.id, String(error))
+          }
+        })()
+      } else if (record.holder.kind === 'session' && record.holder.id.startsWith(RECOVERY_HOLDER_PREFIX)) {
+        // A recovery that was running when the host stopped left only its borrow; it is not a ticket's lease.
+        broker.release(record.token, 'stopped', undefined, 'an interrupted recovery borrow')
+      }
+    }
+    tickets.beat()
+    this.environmentTimer = setInterval(() => this.environmentHosted?.tickets.beat(), 30_000)
+    this.environmentTimer.unref?.()
+  }
+  /**
+   * The host's own acceptance fact, never a report: the ticket completed with the strict acceptance it
+   * required, or, for a ticket that requires none, it recorded its result as ready.
+   */
+  private acceptancePassed(ticket: Ticket): boolean {
+    // Independently required review/design must remain current even without strict tests and with an old ready report.
+    try { assertTicketValidated(ticket) } catch { return false }
+    if (!ticket.validation?.enabled) {
+      // A runner that did not report ready (a dropped report, a closed pull request) accepted nothing.
+      return ticket.assignments.some(assignment => assignment.report?.state === 'ready')
+    }
+    return true
+  }
+  /** The shared TP environment's holder and latest release, for the panel and the operator. */
+  environmentView(): EnvironmentExclusivityView {
+    return this.environmentHosted?.broker.view() ?? { held: false }
+  }
+  /** Stop exactly the TP editor this deployment started for a ticket, before its environment goes elsewhere. */
+  private async stopTicketEditor(ticketId: string, environment: TpEditorEnvironment): Promise<void> {
+    await this.editorRecovery?.cleanup(ticketId, environment)
   }
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      context: kind => runtime.context(kind),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog(),
+      environment: () => runtime.environmentView() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    // The environment lease outlives the host: the heartbeat stops, the record stays for the next start.
+    if (this.environmentTimer) { clearInterval(this.environmentTimer); this.environmentTimer = undefined }
+    this.environmentHosted?.broker.halt()
     try {
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]

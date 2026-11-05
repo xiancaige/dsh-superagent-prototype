@@ -2,6 +2,7 @@
 import type { ReactNode } from 'react'
 import { usePoll, type Problem } from './api.ts'
 import { Button, Icon } from './controls.tsx'
+import { LocalCompose } from './local-compose.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
@@ -72,6 +73,7 @@ export function OverviewPage() {
     onClick={() => navigate(route)}>{t('details')}</button>
   return <>
     {error && <LoadState error={error} loading={false} />}
+    <LocalCompose />
     <Section title={t('pendingTickets')} count={data.person.length}>
       {data.person.length ? <ul className="dt-list dt-cards">{data.person.map(ticket => <TicketLine key={ticket.id} ticket={ticket} question
         onChanged={reload} />)}</ul>

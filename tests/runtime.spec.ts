@@ -1096,6 +1096,48 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
 })
 
+it('uses the source root as actual worker cwd and never runs configured prepare, including retry', async () => {
+  runtime.machine.workspaceMode = 'source'
+  runtime.machine.sourceRoot = directory
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 99', directory: join(directory, 'ignored') } })
+  subprocess.spawn.mockClear()
+  const { ticket, sessionId } = await acceptedTicket()
+  expect(ticket.execution!.directory).toBe(directory)
+  expect(controller.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId, workspaceId: directory }))
+  expect(subprocess.spawn.mock.calls.some(([spec]) => ['sh', 'pwsh'].includes(spec.argv[0]!))).toBe(false)
+  expect(subprocess.spawn.mock.calls).toContainEqual([expect.objectContaining({ cwd: directory, argv: expect.arrayContaining(['git', 'config']) })])
+  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'retry safely' })
+  runtime.engine.retryTicket(ticket.id)
+  await runtime.idle()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.state).toBe('running')
+  expect(subprocess.spawn.mock.calls.some(([spec]) => ['sh', 'pwsh'].includes(spec.argv[0]!))).toBe(false)
+})
+
+it('fails closed for a missing source root without preparing or creating it', async () => {
+  runtime.machine.workspaceMode = 'source'
+  runtime.machine.sourceRoot = join(directory, 'missing-source')
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 99' } })
+  subprocess.spawn.mockClear()
+  const { ticket } = await acceptedTicket()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('must already exist') })
+  expect(subprocess.spawn).not.toHaveBeenCalled()
+  expect(readdirSync(directory)).not.toContain('missing-source')
+})
+
+it('does not implicitly rebind a persisted isolated ticket when source mode is enabled', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
+  runtime.machine.workspaceMode = 'source'
+  runtime.machine.sourceRoot = directory
+  subprocess.spawn.mockClear()
+  runtime.engine.retryTicket(ticket.id)
+  await runtime.idle()
+  const stored = runtime.store.tickets.get(ticket.id)!
+  expect(stored.execution!.directory).toBe(ticket.execution!.directory)
+  expect(stored.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('use a new source-mode ticket') })
+  expect(subprocess.spawn).not.toHaveBeenCalled()
+})
+
 it('counts a ticket whose directory the host prepared before prepare commands existed as prepared', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })

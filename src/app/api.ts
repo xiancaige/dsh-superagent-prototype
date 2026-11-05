@@ -18,7 +18,11 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'POST local/messages': { body: { id: string; text: string; thread?: string }; response: import('../sources/local.ts').LocalReceipt }
+  'GET local/messages': { query: { thread: string }; response: { thread: string; messages: import('../sources/local.ts').LocalMessage[] } }
   'GET state': { response: StateView }
+  /** Phase 2 C: the shared TP environment's holder, its heartbeat, and the last release. */
+  'GET environment': { response: import('./environment-exclusive.ts').EnvironmentExclusivityView }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
@@ -32,8 +36,31 @@ export interface Api {
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
+  /** Trusted design contract/approval; intentionally no worker approval tool. */
+  'GET tickets/:id/design': { response: { designApproval: import('../core/design.ts').DesignApproval | null } }
+  'PUT tickets/:id/design': { body: import('../core/design.ts').DesignConfiguration; response: { designApproval: import('../core/design.ts').DesignApproval } }
+  'POST tickets/:id/design': { body: import('../core/design.ts').DesignApprovalInput; response: { designApproval: import('../core/design.ts').DesignApproval } }
+  /** Trusted operator-attested workflow review, independent of strict test acceptance. */
+  'GET tickets/:id/review': { response: { review: import('../core/review.ts').IndependentReview | null } }
+  'PUT tickets/:id/review': { body: import('../core/review.ts').ReviewConfiguration; response: { review: import('../core/review.ts').IndependentReview } }
+  'POST tickets/:id/review': { body: import('../core/review.ts').ReviewDecisionInput; response: { review: import('../core/review.ts').IndependentReview } }
+  'PUT tickets/:id/validation': { body: { enabled: true; contract?: Omit<import('../validation.ts').ValidationContractInput, 'revision'>; visual?: import('../visual-contract.ts').VisualContractInput }; response: { validation: import('../core/validation.ts').StrictValidation } }
+  'GET tickets/:id/validation': { response: { validation: import('../core/validation.ts').StrictValidation | null } }
+  'PUT tickets/:id/validation/visual': { body: import('../visual-contract.ts').VisualContractInput; response: { validation: import('../core/validation.ts').StrictValidation | null } }
+  'POST tickets/:id/validation/visual/prepare': { response: { prepared: true } }
   'POST tickets/:id/retry': { response: { retried: true } }
   'POST tickets/:id/stop': { response: { stopped: true } }
+  'GET tickets/:id/delivery': { response: import('../core/delivery.ts').DeliveryState }
+  'PUT tickets/:id/delivery': { body: { level: import('../core/delivery.ts').DeliveryLevel; granted: boolean }; response: import('../core/delivery.ts').DeliveryState }
+  'POST tickets/:id/delivery': { body: { level: import('../core/delivery.ts').DeliveryLevel; assignmentId: string; requestId: string }; response: import('../core/delivery.ts').DeliveryResult }
+  /** Phase 2 C: a person hands the ticket's TP environment over; the host exports the scene first or refuses. */
+  'POST tickets/:id/environment/handover': { body: { stop?: boolean }; response: { handedOver: boolean; export?: string; files: number; error?: string } }
+  /** Phase 2 C/D: an operator takes the environment again for a ticket that gave it back (for example after acceptance, before delivery). */
+  'POST tickets/:id/environment/acquire': { response: { held: true } }
+  /** Phase 2 C/D: an operator gives back the environment an ended ticket still holds (editor stopped first). */
+  'POST tickets/:id/environment/release': { response: { released: boolean; error?: string } }
+  /** Phase 2 D: an operator settles an unresolved delivery attempt against the target's own receipt. */
+  'POST tickets/:id/delivery/reconcile': { body: { operationKey: string; result: 'delivered' | 'discarded'; receipt?: string; reason?: string }; response: { state: string } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }

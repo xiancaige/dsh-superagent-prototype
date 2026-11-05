@@ -1,5 +1,7 @@
 /** What the Executor and its workers report about the Assignments that run tickets. */
 import { key } from './ids.ts'
+import { assertTicketValidated } from './validation.ts'
+import { assertTicketDesignApproved } from './design.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
 import type { ReportState, Ticket } from './model.ts'
@@ -35,6 +37,7 @@ export class Assignments extends EnginePart {
     const ticket = this.require(ticketId)
     const assignment = ticket.assignments.find(item => item.id === assignmentId)
     if (!assignment || assignment.state === 'ended') return
+    assertTicketDesignApproved(ticket, assignmentId)
     assignment.state = 'running'; assignment.startedAt ??= this.now()
     ticket.updatedAt = this.now()
     this.repo.tickets.save(ticket)
@@ -110,6 +113,7 @@ export class Assignments extends EnginePart {
     const assignment = runningAssignment(ticket) ?? latestAssignment(ticket)
     if (!assignment) throw new UserError('unknownAssignment')
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
+    if (report.state === 'ready') assertTicketValidated(ticket)
     const at = this.now()
     const previous = ticket.attention
     const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })

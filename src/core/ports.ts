@@ -82,6 +82,31 @@ export interface Outbox {
   withdraw(id: string): void
 }
 
+/**
+ * Phase 2 C: a ticket's hold on the shared environment it changes. The host owns the facts (the lock,
+ * its heartbeat, the handover export); the engine only asks, and never trusts the record for whether a
+ * ticket may be called done.
+ */
+export interface Environments {
+  /**
+   * Take the environment for a newly accepted ticket, before its directory or editor exists; a holder
+   * that has it throws `EnvironmentHeld` naming that holder. A restarted host resumes its own lease.
+   */
+  acquire(ticketId: string, title: string, purpose?: 'delivery'): void
+  /** The ticket's hold as the host recorded it, or undefined when it holds nothing. */
+  describe(ticketId: string): TicketHold | undefined
+  /** Whether the ticket holds the environment now: the engine's own line of defence beside the host's lock. */
+  holds(ticketId: string): boolean
+  /** A person's explicit handover: export the scene, then release, or refuse and keep holding. */
+  handover(ticketId: string): Promise<{ handedOver: boolean; export?: string; files: number; error?: string }>
+  /** The ticket's work ended; the host releases only for the facts the contract names. */
+  end(ticketId: string, ended: { by: TicketEndBy; outcome: TicketOutcome }, acceptancePassed: boolean): Promise<boolean>
+}
+/** A ticket's hold, as the host recorded it. */
+export interface TicketHold { ticketId: string; held?: { at: string } }
+/** Whether the ticket itself passed the acceptance the host requires before it may be called done. */
+export type AcceptanceFacts = (ticket: Ticket) => boolean
+
 /** What the Engine reports after a change, by event type. */
 export interface DomainEvents {
   'trigger.received': { triggerId: string; threads: string[] }
@@ -99,6 +124,10 @@ export interface DomainEvents {
   /** A person's follow-up that reached tickets and that an earlier version also queued for Eval left the queue. */
   'trigger.followup': { triggerId: string }
   'policy.changed': { from: string; to: string }
+  /** Phase 2 C: the ticket took the environment, or was refused it because `holder` has it. */
+  'ticket.exclusive': { ticketId: string; action: 'acquired' | 'refused'; holder?: string; reason?: string }
+  /** Phase 2 C: a person handed the ticket's environment over, or the handover was refused with why. */
+  'ticket.handover': { ticketId: string; handedOver: boolean; export?: string; error?: string }
 }
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]
 

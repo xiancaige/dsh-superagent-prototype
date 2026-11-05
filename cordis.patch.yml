@@ -6,6 +6,10 @@
       name: dsh-superagent
     - id: dsh-superagent-github
       name: dsh-superagent/github-watch
+    # Optional local operator Source; enable explicitly in the local profile.
+    - id: dsh-superagent-local
+      name: dsh-superagent/local-source
+      disabled: true
     # Optional Feishu Source; requires configuring a bot CLI after enabling.
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch
@@ -36,30 +40,13 @@
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
           # A foreground command waits at most 5 s, then the shell tool moves it to a background job.
-          - id: shell
-            name: cordis:group
-            group: true
-            isolate:
-              shell: true
-            config:
-              - id: bash-sandbox
-                name: '@deepseek-ai/dsh-bash-sandbox'
-                disabled: !!js process.platform === 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: pwsh-sandbox
-                name: '@deepseek-ai/dsh-pwsh-sandbox'
-                disabled: !!js process.platform !== 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: tool-bash
-                name: '@deepseek-ai/dsh-tool-bash'
-                disabled: !!js process.platform === 'win32'
-              - id: tool-pwsh
-                name: '@deepseek-ai/dsh-tool-pwsh'
-                disabled: !!js process.platform !== 'win32'
+          # DSH rc.2 owns sandbox executors on the host plane; presets select tools only.
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search
@@ -136,30 +123,13 @@
               maxBytes: 65536
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
-          - id: shell
-            name: cordis:group
-            group: true
-            isolate:
-              shell: true
-            config:
-              - id: bash-sandbox
-                name: '@deepseek-ai/dsh-bash-sandbox'
-                disabled: !!js process.platform === 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: pwsh-sandbox
-                name: '@deepseek-ai/dsh-pwsh-sandbox'
-                disabled: !!js process.platform !== 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: tool-bash
-                name: '@deepseek-ai/dsh-tool-bash'
-                disabled: !!js process.platform === 'win32'
-              - id: tool-pwsh
-                name: '@deepseek-ai/dsh-tool-pwsh'
-                disabled: !!js process.platform !== 'win32'
+          # DSH rc.2 owns sandbox executors on the host plane; presets select tools only.
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
             config:

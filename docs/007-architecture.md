@@ -45,7 +45,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 
 `Engine` (`src/core/engine.ts`) is the only writer of Triggers, Threads, Decisions, Tickets and Assignments. It receives these ports from `src/core/ports.ts`: `Repositories`, a current-Policy getter, `SourceScope`, `Assessor`, `Executor` and `Outbox`. Optional dependencies are `prepareTicket`, `now` and `emit`.
 
-All Engine methods are synchronous. Each command changes its aggregates in one transaction. `evaluateDue` uses a separate transaction for each Eval or Ticket it changes. Ports enqueue external work inside the transaction; adapters perform it after commit. Invalid requests throw `UserError`.
+Engine aggregate commands are synchronous. `runTicketTests` is the exception: it persists a running marker, awaits the host-owned child process outside the transaction, then atomically checks ownership and stores evidence. Each aggregate command changes its aggregates in one transaction. `evaluateDue` uses a separate transaction for each Eval or Ticket it changes. Ports enqueue external work inside the transaction; adapters perform it after commit. Invalid requests throw `UserError`.
 
 The Engine exposes one entry point and delegates to five internal parts. It owns each command's transaction. Commands spanning parts, such as `attach`, `evaluateDue` and `policyChanged`, call the parts in sequence.
 
@@ -252,6 +252,15 @@ Each model request binds the Session to the current prompt revision. The revisio
 | `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
 | `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, CLI transport, the agent's process environment |
 
+## Phase 2 D delivery boundary
+
+The delivery authorization document contains the responsibility matrix and explicit UE/CQTest/asset gaps.
+`src/core/delivery.ts` owns independent, expiring operator grants, strict test/visual/current-lease checks and the persistent
+at-most-once operation ledger. `Ticket.deliveryAuthorization` is separate from Input-delivery errors. `Engine` exposes the
+operator grant/read entries and one common guarded dispatch path; worker tools receive dispatch only. Neither ready nor
+completion creates authority or runs a delivery. `src/app/simulated-delivery.ts` implements only local simulation receipts,
+including simulated push/PR sub-effects; no production Git/PR/package/upload adapter is implied.
+
 ## Dependency rules
 
 - **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind)`; its kind's code sees only its `SourceContext`.
@@ -305,6 +314,25 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/intake.ts` | `Intake`: Triggers from Sources, to their Tickets and, unless a person's message reached one, to Eval |
 | `src/core/evals.ts` | `Evals`: the Evals of Threads and their Decisions |
 | `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
+| `src/validation.ts` | Trusted Python unittest / Node test / CQTest-report contract, host-owned real subprocess runner for the first two, content fingerprints (Unreal run output excluded only in a `.uproject` workspace) and evidence verification |
+| `src/cqtest-validation.ts` | Report-validating Unreal CQTest adapter: reads the `index.json` a trusted script wrote, never launches Unreal; fresh-for-this-assignment, clean, complete and hash-bound |
+| `src/core/validation.ts` | Optional persisted strict acceptance and the common ticket validation guard |
+| `src/core/design.ts` | Opt-in operator design confirmation bound to document digest, scope, ticket and assignment; shared launch and completion guard |
+| `src/core/review.ts` | Opt-in independent operator-attested review identities, strict management schemas and current workspace fingerprint acceptance guard |
+| `src/visual.ts` | Decodable-frame header check, frame digests and paths, the pass/fail/undetermined verdict vocabulary, and the phase B3 rules that refuse a reused frame or one frame judged two ways |
+| `src/visual-contract.ts` | Host-only visual contract validation: fixed scenario, capture template, inspector and named checks |
+| `src/app/visual-capture.ts` | The deployment's real capture route and the VisualCapture adapter the Engine asks; stdio counterpart in |
+| `src/visual-host.ts` | MCP capture transport, host-written frame manifest recording each capture's tool response, independent inspector run, the frame ledger and the visual assessment |
+| `src/app/visual-stdio.ts` | A local stdio MCP capture server connection of its own |
+| `src/core/visual.ts` | Optional visual acceptance inside the shared strict gate and its binding rules |
+| `src/app/editor-recovery.ts` | Phase B2 TP editor recovery: TP-only identity, the real-handshake readiness rule and one recovery chance per ticket; its exclusivity is borrowed from phase 2 C's broker |
+| `src/app/environment-exclusive.ts` | Phase 2 C the TP environment exclusivity: the persisted lease in B2's one lock file (holder, kind, resources, acquisition time, heartbeat), the holder that is never stolen, the three release facts and the handover export |
+| `src/app/simulated-delivery.ts` | Phase 2 D opt-in local simulation receipts only; no real commit/push/PR/upload |
+| `src/core/delivery.ts` | Phase 2 D independent expiring grants, strict acceptance/exclusivity and persistent at-most-once dispatch |
+| `src/app/ticketed-environment.ts` | Phase 2 C the ticket side of the environment: acquisition at acceptance, heartbeats, a person's handover and the release a ticket's end allows, exposed as the Engine's `Environments` port |
+| `src/app/editor-recovery-lease.ts` | Phase 2 C the recovery's borrow of that one lock: inside its holder's lease when the holder is the ticket, otherwise a borrow that names the holder it found |
+| `src/sources/local.ts` | `Local` source: messages posted through the panel API into a local thread |
+| `src/client/local-compose.tsx` | Panel control that composes a local message |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
 | `src/core/replies.ts` | `Replies`: the Engine's Channel writes |
 | `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [003 Execution](003-execution.md) |
@@ -355,6 +383,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/feishu-environment.ts` | Per-child Feishu CLI configuration and ambient credential/workspace-marker isolation without changing the host environment |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -403,12 +432,37 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Test | Covers |
 | --- | --- |
+| `tests/validation.spec.ts` | Real Python adapter pass/fail/skip/zero cases, fingerprints, paths, cancellation and timeout |
+| `tests/design-gate.spec.ts` | Design document and scope confirmation, launch/ready/result/delivery gates, changed document and assignment rejection, and SQLite persistence |
+| `tests/review-gate.spec.ts` | Independent review identity and forgery rejection, real fingerprints, ready/result/delivery gates and SQLite restoration |
+| `tests/phase2-acceptance-matrix.spec.ts` | Executable index of the Phase 2 A acceptance matrix and the four returned items: each row must name a real test title that still exists |
+| `tests/cqtest-validation.spec.ts` | CQTest report adapter: clean/fresh/complete acceptance, stale-report and doctored-count rejection, report re-check on re-validation, and Unreal-output fingerprint scope |
+| `tests/node-validation.spec.ts` | Real Node built-in test adapter structured events, required IDs, failure/skip/zero cases, timeout, cancellation and tamper rejection |
+| `tests/strict-validation.spec.ts` | Engine lifecycle gates, shared-thread closures, retries, worker tool binding and SQLite evidence restoration |
+| `tests/visual.spec.ts` | Real MCP capture over stdio, independent inspector, passing/failed/undetermined verdicts, stale evidence and the shared completion gate |
+| `tests/visual-gate.spec.ts` | Visual acceptance at the Engine and worker tools: blocked ready/complete without a pass, failed reads, preparation, assignment binding and inspector tampering |
+| `tests/visual-recovery.spec.ts` | Phase B2 recovery with injected processes, launch, kill and lock: TP-only identity, exclusivity, real-handshake readiness, one chance per ticket and cleanup of only the started PID |
+| `tests/phase2c-exclusive.spec.ts` | Phase 2 C with injected PIDs and a throw-away git repository: the persisted lease and its heartbeat, a refused second holder, waiting and idling that keep it, the owner a restart keeps, the three release facts only, and the handover export that leaves the scene untouched |
+| `tests/phase2cd-export.spec.ts` | Phase 2 C handover export of a dirty git work tree: tracked, staged, every untracked file and binary reach the patch; bundle verified; tree untouched |
+| `tests/phase2cd-stop.spec.ts` | Phase 2 C real PID-exact `Stop-Process` on a process the test started: stops only the recorded process, a reused PID is left alone |
+| `tests/phase2cd-review.spec.ts` | Phase 2 C+D review findings: untracked-only and 3000-file handover export, PID-exact editor stop with start-time identity and fail-closed listing, commit needs the environment, interrupted attempts become uncertain, operator reconcile, EnvironmentHeld is not transient |
+| `tests/phase2cd-process.spec.ts` | Phase 2 C+D with real separate OS processes over one SQLite state: different-PID lease recovery, a live foreign PID is never taken over, one receipt, uncertain never resent |
+| `tests/phase2cd-lifecycle.spec.ts` | Phase 2 C+D lifecycle: completion release after editor cleanup, failed cleanup keeps the lock, re-acquire before continuing, different-PID broker rules, explicit operator acquire/release |
+| `tests/phase2d-tool.spec.ts` | Phase 2 D opt-in worker request tool, strict schemas, ticket/assignment closure and no worker grants |
+| `tests/phase2d-delivery.spec.ts` | Phase 2 D real unittest/visual/broker evidence, independent grants, denied stale versions/handover and SQLite restart idempotence with simulated targets |
+| `tests/phase2c-engine.spec.ts` | Phase 2 C through the Engine: the environment taken at acceptance, a second ticket refused and not launched, waiting and rework keeping it, a completion the host does not confirm refused, the stop and the self-end releasing it, and a handover that exports first |
+| `tests/visual-integrity.spec.ts` | Phase B3 evidence integrity: a fresh recorded frame per capture, two real captures recomputing their own transitions, and the refusal of a renamed or reused frame and of a frame judged two ways |
+| `tests/local-compose.spec.tsx` | The local message composer |
+| `tests/local-setup.spec.ts` | Local source setup through the panel |
+| `tests/local-source.spec.ts` | The local source receiving messages |
+| `tests/startup-lock.spec.ts` | The startup lock of a state directory |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
+| `tests/feishu-environment.spec.ts` | Feishu child configuration isolation, ambient credential and workspace-marker tombstones, and host environment preservation |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
@@ -436,6 +490,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
+| `tests/environment-config.spec.ts` | The rollout's `environment` section: absent or disabled stays `recoveryEnabled: false` (no environment, `held:false`, `noEnvironment`), an enabled section reaches the plugin config through a valid YAML block, and a wrong path, port or key fails loudly in `setup-superagent.mjs` instead of disabling silently |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -522,6 +577,9 @@ Each Executor has six application tools:
 | --- | --- |
 | `orchestrator_read` | Read resources available to its own Ticket |
 | `orchestrator_ack` | Acknowledge a request |
+| `orchestrator_run_tests` | Run only host-configured strict acceptance tests and persist real evidence |
+| `orchestrator_capture_visual` | Ask the host to capture the fixed visual scenario with the trusted tool; no path, tool or verdict is accepted |
+| `orchestrator_read_visual` | Ask the host inspector to read the captured frames and record per-check verdicts |
 | `orchestrator_report` | Report progress or an outcome, binding a pull request under the pull-request rules |
 | `orchestrator_thread_unrelated` | Drop an unrelated attached Thread, hand back its owned follow-ups and tell the main Session why |
 | `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |

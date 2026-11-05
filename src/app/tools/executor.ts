@@ -1,6 +1,6 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { DELIVERY_LEVELS, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -11,9 +11,13 @@ import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
-  readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
+  /** Absent by default; do not advertise an unconfigured delivery target to workers. */
+  readonly deliveryEnabled?: boolean
+  readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'> & Partial<Pick<EngineForExecutor,
+    'runTicketTests' | 'captureVisual' | 'readVisual' | 'deliverTicket'>>
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
+  readonly lifetime?: AbortSignal
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
@@ -22,7 +26,54 @@ export interface ExecutorToolsHost {
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
+  const runningAssignment = () => {
+    const assignment = host.store.tickets.get(ticketId)?.assignments.find(item => item.state === 'running')
+    if (!assignment) throw new Error('No running assignment for this ticket')
+    return assignment.id
+  }
+  const combined = (signal: AbortSignal) => host.lifetime ? AbortSignal.any([signal, host.lifetime]) : signal
   return [
+    tool({
+      name: 'orchestrator_run_tests',
+      description: 'Run the current ticket’s trusted strict acceptance tests in a real subprocess. No worker commands or result assertions are accepted. Changing source or tests invalidates evidence.',
+      schema: z.object({}).strict(),
+      execute: async (_args, signal) => {
+        if (!host.engine.runTicketTests) throw new Error('Strict validation runner unavailable')
+        return host.engine.runTicketTests(ticketId, runningAssignment(), combined(signal))
+      },
+    }),
+    tool({
+      name: 'orchestrator_capture_visual',
+      description: 'Ask the host to capture the fixed visual scenario with the trusted capture tool. Only a group name and a frame count within the contract are accepted; the host writes and records the frames, and a capture never passes a check by itself.',
+      schema: z.object({
+        group: z.string().min(1).max(64).describe('A short path-safe name for this capture group; a group is captured once.'),
+        frames: z.number().int().min(1).max(20).optional().describe('How many frames to capture, at most the contract minimum; 1 by default.'),
+      }).strict(),
+      execute: async (args, signal) => {
+        if (!host.engine.captureVisual) throw new Error('Visual capture runner unavailable')
+        return host.engine.captureVisual(ticketId, runningAssignment(), args.group, args.frames ?? 1, combined(signal))
+      },
+    }),
+    tool({
+      name: 'orchestrator_read_visual',
+      description: 'Ask the host image inspector to read the captured frames and record a verdict for every contract check. Nothing the worker supplies can certify a check.',
+      schema: z.object({}).strict(),
+      execute: async (_args, signal) => {
+        if (!host.engine.readVisual) throw new Error('Visual inspector runner unavailable')
+        return host.engine.readVisual(ticketId, runningAssignment(), combined(signal))
+      },
+    }),
+    ...host.deliveryEnabled ? [tool({
+      name: 'orchestrator_request_delivery',
+      description: 'Request one independently operator-authorized commit, push or release for this ticket. Defaults are off. '
+        + 'The host verifies current assignment, authorized version, strict test/visual evidence and current exclusivity; '
+        + 'ready grants nothing. Reuse request_id on transport retries. No commands, targets, grants or result assertions are accepted.',
+      schema: z.object({ level: z.enum(DELIVERY_LEVELS), request_id: z.string().min(1).max(200) }).strict(),
+      execute: async args => {
+        if (!host.engine.deliverTicket) throw new Error('Delivery runner unavailable')
+        return host.engine.deliverTicket(ticketId, runningAssignment(), args.level, args.request_id)
+      },
+    })] : [],
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
       true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
     tool({

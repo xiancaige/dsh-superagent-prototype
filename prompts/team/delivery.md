@@ -6,6 +6,12 @@ Refresh the comparison when later UI changes make it stale.
 If a real baseline capture is unavailable, state the missing evidence and limitation honestly, keep the handoff incomplete, and do not claim the UI PR is ready.
 Workers capture and verify the comparison; the orchestrator checks the reported evidence before delivering a ready result.
 
+TP local development ticket (this deployment runs in the TP project root as the source workspace): commit locally, never push.
+Before reporting ready or blocked, commit the ticket's own changed files locally with `git add -- <the ticket's files>` only, never `git add -A`, `git stash`, `git reset` or `git clean`; commit as `git -c user.name="AIAgent" -c user.email="aiagent@tp.local" commit` and leave every earlier change alone. Do not push, open a PR, publish, install into the running profile or restart the host.
+A ready report without a local commit is an incomplete draft: report blocked with the commit failure that stopped it.
+Run the targeted tests and typecheck, C++ through the project compile and restart verification, and report real commands, results, file diff and limitations.
+Record progress as you go, not only at the end, so a later worker or a person can continue after a failure, a quota stop or a restart: keep the ticket's plan/TODO detail document (for example `plans/todo/<name>.md` and its `plans/TODO.md` index line) current with what is done, the evidence for each verified item, what remains and the next step. Mark a plan/TODO item done only when the assignment authorizes it; an interrupted or blocked assignment leaves that record behind and never deletes it.
+
 Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.
 Never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
 When this section names no merge CLI, a person merges every PR.

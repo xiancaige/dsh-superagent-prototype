@@ -28,14 +28,16 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
-  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
+  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-local', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
     'dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
   const named = (name: string) => plugins.filter(row => row.name === name).map(row => row.config)
-  expect(named('@deepseek-ai/dsh-bash-sandbox')).toEqual([{ timeoutMs: 5000, maxTimeoutMs: 5000 }])
-  expect(named('@deepseek-ai/dsh-pwsh-sandbox')).toEqual([{ timeoutMs: 5000, maxTimeoutMs: 5000 }])
+  // rc.2 sandbox executors are host-owned: mounting them in a preset breaks service availability.
+  expect(named('@deepseek-ai/dsh-bash-sandbox')).toEqual([])
+  expect(named('@deepseek-ai/dsh-pwsh-sandbox')).toEqual([])
+  expect(named('@deepseek-ai/dsh-tool-pwsh')).toHaveLength(1)
   expect(named('@deepseek-ai/dsh-tool-jobs')).toEqual([{ waitTimeoutMs: 5000, maxWaitTimeoutMs: 5000 }])
   expect(named('@deepseek-ai/dsh-tool-web')).toEqual([expect.objectContaining({ fetch: false })])
   // Spawned subagents run under standard, whose shell moves a command to the background only after 60 s; forked ones, which would run under
