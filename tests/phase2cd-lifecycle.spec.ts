@@ -289,8 +289,6 @@ describe('phase 2 C/D (d): a ticket continues after a handover only through the 
     expect(h.tickets.holds(second)).toBe(true)
     // The first ticket’s worker may not run a host tool for an environment it does not hold.
     await expect(h.engine.runTicketTests(first, assignmentId)).rejects.toMatchObject({ code: 'notHolding' })
-    await expect(h.engine.captureVisual(first, assignmentId, 'group', 1)).rejects.toMatchObject({ code: 'notHolding' })
-    await expect(h.engine.readVisual(first, assignmentId)).rejects.toMatchObject({ code: 'notHolding' })
     // Once B hands over, A may take it back.
     await handedOver(h, second)
     ensureEnvironment(h.engine, first)

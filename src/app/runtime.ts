@@ -46,7 +46,6 @@ import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
-import { DEFAULT_VISUAL_ENDPOINT, HostVisualCapture, type VisualCaptureSettings } from './visual-capture.ts'
 import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } from './editor-recovery.ts'
 import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
 import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
@@ -157,16 +156,6 @@ export class Runtime extends Service implements SourceHost {
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   /**
-   * The real capture transport this deployment uses. Unset means the project's editor MCP endpoint;
-   * an operator override names either that endpoint (`DSH_SUPERAGENT_VISUAL_ENDPOINT`) or a local MCP
-   * capture server for deployments with no editor (`DSH_SUPERAGENT_VISUAL_COMMAND`).
-   */
-  private visualSettings(): VisualCaptureSettings {
-    const command = process.env.DSH_SUPERAGENT_VISUAL_COMMAND
-    if (command) return { transport: 'stdio', command, args: (process.env.DSH_SUPERAGENT_VISUAL_ARGS ?? '').split(' ').filter(Boolean) }
-    return { transport: 'streamable-http', endpoint: process.env.DSH_SUPERAGENT_VISUAL_ENDPOINT ?? DEFAULT_VISUAL_ENDPOINT }
-  }
-  /**
    * Phase B2 editor recovery. Off unless the rollout configures it (`environment.recoveryEnabled` in
    * the profile patch, or `DSH_SUPERAGENT_EDITOR_RECOVERY=1` on a deployment configured by hand), and
    * then it acts only on the absolute TP project and editor it names, never on another UE project. The
@@ -238,19 +227,15 @@ export class Runtime extends Service implements SourceHost {
       adapter,
       // The ticket's one recovery chance is persisted with the ticket: a restart cannot grant a second.
       record: (ticketId: string) => ({
-        prior: store.tickets.get(ticketId)?.validation?.visual?.recovery,
+        prior: store.tickets.get(ticketId)?.editorRecovery,
         save: (_prior: unknown, outcome: unknown) => {
           store.atomic(() => {
             const ticket = store.tickets.get(ticketId)
-            const visual = ticket?.validation?.visual
-            if (!visual) return
+            if (!ticket) return
             const result = outcome as { kind: string; reason: string; pid?: number; startedPid?: number; sessionId?: string; tools?: readonly string[]; portListened?: boolean; at: string }
-            const attempts = (store.tickets.get(ticketId)?.validation?.visual?.recovery?.attempts ?? 0) + 1
-            visual.recovery = { attempts, outcome: result, ...(result.startedPid ? { startedPid: result.startedPid } : {}) }
-            // An environment block is what the contract reports instead of "test failure".
-            if (result.kind === 'unavailable') visual.blocked = `TP editor environment block: ${result.reason}`
-            else delete visual.blocked
-            store.tickets.save(ticket!)
+            const attempts = (store.tickets.get(ticketId)?.editorRecovery?.attempts ?? 0) + 1
+            ticket.editorRecovery = { attempts, outcome: result, ...(result.startedPid ? { startedPid: result.startedPid } : {}) }
+            store.tickets.save(ticket)
           })
         },
       }),
@@ -309,15 +294,11 @@ export class Runtime extends Service implements SourceHost {
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
-      // Phase B: the host visual adapter is the only path to a frame; the deployment names its transport.
-      // Phase B2: an unreachable editor endpoint is recovered first, when the operator enabled it.
-      // Phase 2 C: the environment is composed before the recovery, which borrows its one lock.
+      // Phase 2 C: the environment is composed before any editor recovery, which borrows its one lock.
       this.environmentHosted = this.environmentHost()
       const recovery = this.recovery(store)
-      const visual = new HostVisualCapture({ settings: () => this.visualSettings(), statePath: () => join(machine.stateDir, 'visual-tool'),
-        ...(recovery ? { recovery: () => recovery.adapter, recoveryRecord: (ticketId: string) => recovery.record(ticketId) } : {}) }, machine)
       const environments = environmentPort(this.environmentHosted?.tickets)
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, visualCapture: visual,
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
         // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
         ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'

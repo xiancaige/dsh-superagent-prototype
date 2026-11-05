@@ -1,13 +1,11 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
 import { DesignConfigurationRequest, DesignApprovalRequest, designBinding, type DesignConfiguration, type DesignApprovalInput } from './design.ts'
-import { randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import * as nodePath from 'node:path'
 import { createValidationContract, runValidation, type ValidationContractInput } from '../validation.ts'
-import { createVisualContract, visualContractStillValid, type VisualContractInput } from '../visual-contract.ts'
-import type { CaptureOutcome, SettledReport } from '../visual-host.ts'
-import type { VisualSettledReport } from './visual.ts'
-import { validationBinding } from './validation.ts'
+import { validationBinding, type VisualFrame } from './validation.ts'
 import { ReviewConfigurationRequest, ReviewDecisionRequest, reviewBinding, type ReviewConfiguration, type ReviewDecisionInput } from './review.ts'
 import { isoTime, liveTicket } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketOutcome, Trigger } from './model.ts'
@@ -25,6 +23,29 @@ export type { WorkerReport } from './assignments.ts'
 export type { Outcome } from './evals.ts'
 export type { ReceiveResult } from './intake.ts'
 export type { Reply, ReplyRequest } from './replies.ts'
+
+/** What a worker says about the visual acceptance it performed; the host records, it does not judge. */
+export interface VisualRecordInput {
+  verdict: 'passed' | 'failed'
+  reason: string
+  frames: readonly { path: string; sha256: string }[]
+}
+
+/**
+ * Accept only a frame that really exists and whose bytes still hash to the digest the worker read.
+ * The path may be workspace-relative or absolute; `..` outside the workspace is refused so a
+ * conclusion cannot point at arbitrary files.
+ */
+function verifyVisualFrame(workspace: string, frame: { path: string; sha256: string }): VisualFrame {
+  const resolved = nodePath.isAbsolute(frame.path) ? frame.path : nodePath.resolve(workspace, frame.path)
+  const relativePath = nodePath.relative(nodePath.resolve(workspace), nodePath.resolve(resolved))
+  if (relativePath.startsWith('..') || nodePath.isAbsolute(relativePath)) throw new Error(`Visual acceptance: frame ${frame.path} is outside the workspace`)
+  const bytes = existsSync(resolved) ? readFileSync(resolved) : undefined
+  if (!bytes) throw new Error(`Visual acceptance: frame ${frame.path} does not exist`)
+  const actual = createHash('sha256').update(bytes).digest('hex')
+  if (actual !== frame.sha256.toLowerCase()) throw new Error(`Visual acceptance: frame ${frame.path} does not match its sha256 (disk ${actual})`)
+  return { path: relativePath.split(nodePath.sep).join('/'), sha256: actual, bytes: bytes.length }
+}
 
 /**
  * `realpath` of `target`, or `undefined` when it is missing or unreadable. Path separators are
@@ -54,16 +75,6 @@ function samePath(left: string | undefined, right: string | undefined): boolean 
  */
 export class Engine {
   private readonly testRuns = new Map<string, AbortController>()
-  /** In-flight visual capture/read per ticket: its persisted marker and abort handle; one host run at a time. */
-  private readonly visualRuns = new Map<string, { marker: string; controller: AbortController }>()
-  /** Host-recorded preparation of the trusted capture tool per ticket; never worker-owned. */
-  private readonly visualPrepared = new Map<string, { at: string }>()
-  /** The host visual adapter; visual acceptance is unavailable without one, never simulated. */
-  private get adapter() {
-    const adapter = this.options.visualCapture
-    if (!adapter) throw new Error('Strict visual validation: the host has no visual capture adapter')
-    return adapter
-  }
   private readonly repo: Repositories
   private readonly replies: Replies
   private readonly tickets: Tickets
@@ -204,7 +215,6 @@ export class Engine {
   stopTicket(ticketId: string, reason?: string): Ticket {
     const ticket = this.repo.atomic(() => this.tickets.stop(ticketId, reason))
     this.testRuns.get(ticketId)?.abort()
-    this.visualRuns.get(ticketId)?.controller.abort()
     // Phase 2 C: a stopped ticket is one of the facts that gives the environment back; the host stops
     // the editor it started before the lock goes to the next holder.
     this.releaseEnvironment(ticket, { by: 'human', outcome: 'stopped' })
@@ -313,7 +323,6 @@ export class Engine {
   retryTicket(ticketId: string): Ticket {
     const ticket = this.repo.atomic(() => this.tickets.retry(ticketId))
     this.testRuns.get(ticketId)?.abort()
-    this.visualRuns.get(ticketId)?.controller.abort()
     // A retried ticket reworks under the same Mandate and keeps its environment; nothing is released here.
     return ticket
   }
@@ -457,157 +466,30 @@ export class Engine {
     }
   }
 
-  // Visual acceptance (phase B): the host owns capture, inspection and judgement; a worker only asks.
+  // Visual acceptance: the project editor owns screenshots and the worker performs the acceptance.
+  // The host only records the worker's conclusion with the frames it was drawn from, so a later
+  // reader knows what was judged and whether those frames still match the disk (TODO72).
 
   /**
-   * Operator-only. Configure (or, with no contract, require) real visual evidence for a ticket that
-   * already has strict acceptance. Reconfiguring clears preparation and prior evidence.
+   * Record the worker's own visual acceptance for this ticket. Frames must exist and their sha256
+   * must match what the caller says, so a conclusion cannot be attached to bytes nobody hashed.
    */
-  configureVisual(ticketId: string, input?: VisualContractInput): Ticket {
+  recordVisual(ticketId: string, assignmentId: string, input: VisualRecordInput): Ticket {
     return this.repo.atomic(() => {
       const ticket = this.repo.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket)) throw new Error('Strict visual validation: ticket missing or ended')
-      if (!ticket.validation?.enabled) throw new Error('Strict visual validation: enable strict acceptance first')
-      if (this.visualRuns.has(ticketId)) throw new Error('Strict visual validation: a capture or read is in progress')
-      const contract = input ? createVisualContract(input) : undefined
-      // The workspace must already exist and be its own real path, but the stored directory and
-      // realpath() do not agree on separators: a source-mode ticket stores `F:/TP` while realpath
-      // returns `F:\TP` on Windows, so a raw string comparison refused every source-mode ticket
-      // (TODO72, 2026-11-05). Compare normalized paths instead.
-      if (contract && !isRealDirectory(ticket.execution?.directory)) {
-        throw new Error('Strict visual validation: the ticket workspace must be a real directory')
-      }
-      this.visualPrepared.delete(ticketId)
-      ticket.validation.visual = { ...(contract ? { contract } : {}) }
+      if (!ticket || !liveTicket(ticket)) throw new Error('Visual acceptance: ticket missing or ended')
+      if (!ticket.validation?.enabled) throw new Error('Visual acceptance: enable strict acceptance first')
+      const assignment = ticket.assignments.at(-1)
+      if (assignment?.id !== assignmentId || assignment.state !== 'running') throw new Error('Visual acceptance: stale assignment')
+      const workspace = ticket.execution?.directory
+      if (!workspace) throw new Error('Visual acceptance: the ticket has no workspace')
+      const frames = input.frames.map(frame => verifyVisualFrame(workspace, frame))
+      if (input.verdict === 'passed' && !frames.length) throw new Error('Visual acceptance: a passing verdict needs at least one frame')
+      ticket.validation.visual = { verdict: input.verdict, reason: input.reason, frames,
+        recordedBy: `${assignment.id}`, at: isoTime(this.options.now?.() ?? new Date().toISOString()) }
       this.repo.tickets.save(ticket)
       return ticket
     })
-  }
-
-  /** Operator/host entry: record that the fixed trusted capture tool was confirmed ready for this ticket. */
-  prepareVisualCapture(ticketId: string, at = new Date().toISOString()): void {
-    this.repo.atomic(() => {
-      const ticket = this.repo.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || !ticket.validation?.visual?.contract) throw new Error('Strict visual validation: no visual contract configured')
-      this.visualPrepared.set(ticketId, { at })
-    })
-  }
-
-  /** Whether the host recorded a preparation for this ticket's current visual contract. */
-  visualPreparedFor(ticketId: string): boolean {
-    const ticket = this.repo.tickets.get(ticketId)
-    return this.visualPrepared.has(ticketId) && !!ticket?.validation?.visual?.contract
-  }
-
-  /**
-   * Worker-requested, host-executed capture of the fixed instruction. The worker gives only a group
-   * name and a frame count within the contract; the frames come from the trusted adapter alone.
-   */
-  async captureVisual(ticketId: string, assignmentId: string, group: string, count: number, signal?: AbortSignal): Promise<CaptureOutcome> {
-    this.requireHolding(ticketId)
-    this.beginVisualRun(ticketId, assignmentId)
-    const { contract, workspace } = this.visualTarget(ticketId, assignmentId)
-    const marker = this.visualRuns.get(ticketId)!.marker
-    const combined = this.visualSignal(ticketId, signal)
-    try {
-      const prepared = this.visualPrepared.get(ticketId)
-      const outcome = await this.adapter.capture({ ticketId, assignmentId, workspace, contract, group }, count, prepared, combined)
-      // A finished capture releases the marker but leaves no evidence: the gate needs a passing read.
-      this.repo.atomic(() => {
-        const ticket = this.repo.tickets.get(ticketId)
-        const visual = ticket?.validation?.visual
-        if (!visual) return
-        if (visual.running === marker) delete visual.running
-        delete visual.evidence
-        this.repo.tickets.save(ticket!)
-      })
-      return outcome
-    } catch (error) {
-      this.repo.atomic(() => {
-        const ticket = this.repo.tickets.get(ticketId)
-        const visual = ticket?.validation?.visual
-        if (!visual || visual.running !== marker) return
-        delete visual.running
-        delete visual.evidence
-        this.repo.tickets.save(ticket!)
-      })
-      throw error
-    } finally { this.visualRuns.delete(ticketId) }
-  }
-
-  /** Worker-requested, host-executed read: the independent inspector reads the frames and records verdicts. */
-  async readVisual(ticketId: string, assignmentId: string, signal?: AbortSignal): Promise<{ passed: boolean; reasons: readonly string[]; groups: number }> {
-    this.requireHolding(ticketId)
-    this.beginVisualRun(ticketId, assignmentId)
-    const { contract, workspace } = this.visualTarget(ticketId, assignmentId)
-    const marker = this.visualRuns.get(ticketId)!.marker
-    const combined = this.visualSignal(ticketId, signal)
-    try {
-      // Phase B3: the reports this ticket already settled are the ledger the new one must not contradict.
-      const settled: SettledReport[] = (this.repo.tickets.get(ticketId)?.validation?.visual?.reports ?? []).map(report =>
-        ({ group: report.group, checks: report.checks, frames: report.frames }))
-      const evidence = await this.adapter.assess(contract, ticketId, assignmentId, workspace, combined, settled)
-      combined.throwIfAborted()
-      return this.repo.atomic(() => {
-        const ticket = this.repo.tickets.get(ticketId)
-        if (!ticket || !liveTicket(ticket) || ticket.validation?.visual?.running !== marker
-          || ticket.validation.visual.contract?.digest !== contract.digest || ticket.assignments.at(-1)?.id !== assignmentId) {
-          throw new Error('Strict visual validation: assessment no longer belongs to the current ticket/assignment/contract')
-        }
-        const visual = ticket.validation.visual
-        visual.evidence = evidence
-        delete visual.running
-        delete visual.blocked
-        // Phase B3 ledger: every report this read judged becomes what a later read may not contradict.
-        // A contradictory report is only the ticket's blocking evidence, never a settled entry, so what
-        // two different captures decide stays comparable instead of one of them being taken for granted.
-        if (!evidence.contradictions?.length) {
-          const reports: VisualSettledReport[] = [...(visual.reports ?? [])]
-          visual.reports = [...reports, ...evidence.groups.filter(group => group.checks.length)
-            .map(group => ({ group: group.group, checks: group.checks, frames: group.frames }))]
-        }
-        this.repo.tickets.save(ticket)
-        return { passed: evidence.passed, reasons: evidence.reasons, groups: evidence.groups.length }
-      })
-    } catch (error) {
-      this.repo.atomic(() => {
-        const ticket = this.repo.tickets.get(ticketId)
-        if (ticket?.validation?.visual?.running === marker) { delete ticket.validation.visual.running; this.repo.tickets.save(ticket) }
-      })
-      throw error
-    } finally { this.visualRuns.delete(ticketId) }
-  }
-
-  /** Shared host-run preconditions: open opted-in ticket, current assignment, configured contract, nothing else running. */
-  private beginVisualRun(ticketId: string, assignmentId: string): void {
-    if (this.visualRuns.has(ticketId) || this.testRuns.has(ticketId)) throw new Error('Strict visual validation: another host run is in progress')
-    const marker = randomUUID()
-    this.repo.atomic(() => {
-      const ticket = this.repo.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || !ticket.validation?.enabled) throw new Error('Strict visual validation: not enabled on an open ticket')
-      const visual = ticket.validation.visual
-      if (!visual?.contract) throw new Error('Strict visual validation: no visual contract is configured for this ticket')
-      if (!visualContractStillValid(visual.contract)) throw new Error('Strict visual validation: the configured inspector changed; the operator must reconfigure')
-      const assignment = ticket.assignments.at(-1)
-      if (assignment?.id !== assignmentId || assignment.state !== 'running') throw new Error('Strict visual validation: stale assignment')
-      // A marker left by a crash keeps the ticket blocked until the operator reconfigures, as phase A does.
-      if (visual.running) throw new Error('Strict visual validation: an earlier host run never finished; the operator must reconfigure')
-      delete visual.evidence
-      visual.running = marker
-      this.repo.tickets.save(ticket)
-    })
-    this.visualRuns.set(ticketId, { marker, controller: new AbortController() })
-  }
-  private visualTarget(ticketId: string, assignmentId: string) {
-    const ticket = this.repo.tickets.get(ticketId)
-    const contract = ticket?.validation?.visual?.contract
-    if (!ticket?.execution?.directory || !contract || ticket.assignments.at(-1)?.id !== assignmentId) throw new Error('Strict visual validation: stale assignment or workspace')
-    return { contract, workspace: ticket.execution.directory }
-  }
-
-  private visualSignal(ticketId: string, signal?: AbortSignal): AbortSignal {
-    const controller = this.visualRuns.get(ticketId)!.controller
-    return signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   }
 
   // The Executor
@@ -690,7 +572,6 @@ export class Engine {
   assignmentInterrupted(ticketId: string, assignmentId: string): void {
     this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
     this.testRuns.get(ticketId)?.abort()
-    this.visualRuns.get(ticketId)?.controller.abort()
   }
 
   /** Operator-only grant/revoke. Never exposed to an executor or inferred from ready. */
@@ -726,10 +607,10 @@ export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadCl
 export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
 /** What people ask of the Engine, through the panel or the main Session. */
 export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss' | 'configureValidation'
-  | 'configureDesign' | 'approveDesign' | 'configureReview' | 'recordReview' | 'configureVisual' | 'prepareVisualCapture' | 'handOverEnvironment' | 'acquireEnvironment' | 'releaseEndedEnvironment' | 'configureDelivery' | 'reconcileDelivery' | 'recoverDeliveries' | 'deliveryState' | 'deliverTicket'>
+  | 'configureDesign' | 'approveDesign' | 'configureReview' | 'recordReview' | 'handOverEnvironment' | 'acquireEnvironment' | 'releaseEndedEnvironment' | 'configureDelivery' | 'reconcileDelivery' | 'recoverDeliveries' | 'deliveryState' | 'deliverTicket'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'deferDesignResume' | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply' | 'runTicketTests'
-  | 'captureVisual' | 'readVisual' | 'visualPreparedFor' | 'prepareVisualCapture' | 'deliverTicket' | 'ensureEnvironment'>
+  | 'recordVisual' | 'deliverTicket' | 'ensureEnvironment'>

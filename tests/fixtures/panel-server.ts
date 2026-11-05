@@ -339,8 +339,6 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   // Strict validation has no panel controls yet; the fixture must not pretend to execute host tests.
   'GET tickets/:id/validation': { answer: () => ({ validation: null }) },
   'PUT tickets/:id/validation': { body: true, answer: () => refuse(400, 'Host validation is not simulated by the panel fixture') },
-  'PUT tickets/:id/validation/visual': { body: true, answer: () => refuse(400, 'Host visual validation is not simulated by the panel fixture') },
-  'POST tickets/:id/validation/visual/prepare': { answer: () => refuse(400, 'Host visual capture is not simulated by the panel fixture') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
     const ticket = ticketOf(params.id)
     if (!ticket) return refuse(404, 'Ticket not found')

@@ -3,7 +3,8 @@
  * Repository tampering appears only in explicitly negative binding tests. No remote delivery is performed.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,8 +12,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Store } from '../src/app/store.ts'
 import { SimulatedDelivery } from '../src/app/simulated-delivery.ts'
 import { environmentPort } from '../src/app/ticketed-environment.ts'
-import { HostVisualCapture } from '../src/app/visual-capture.ts'
-import { VISUAL_EVIDENCE_DIR } from '../src/visual.ts'
 import { Engine, MemoryRepositories, type Candidate, type EngineOptions, type Policy, type Repositories, type Ticket } from '../src/core/index.ts'
 import type { DeliveryAttempt, DeliveryLevel, DeliveryResult } from '../src/core/delivery.ts'
 import { ticketed } from './fixtures/environment.ts'
@@ -57,10 +56,6 @@ function harness(input: { repo?: Repositories; directory?: string; state?: strin
   const policy: Policy = { version: 'delivery-policy', paused: false, evalTimeoutMs: 60_000,
     gate: () => ({ admissible: true, strength: 'explicit', basis: { via: 'listed' } }),
     revalidate: () => true, admitsInferred: () => true }
-  const visual = new HostVisualCapture({
-    settings: () => ({ transport: 'stdio', command: process.execPath, args: [join(here, 'fixtures', 'capture-server.mjs')] }),
-    statePath: () => join(state, 'capture-state'),
-  })
   const engine = new Engine({ repo, policy: () => policy,
     scope: { scope: () => ({ listened: true, observed: false }) },
     assessor: { request: candidate => { requests.push(candidate) }, release: vi.fn() },
@@ -69,7 +64,6 @@ function harness(input: { repo?: Repositories; directory?: string; state?: strin
     prepareTicket: ticket => ({ ...ticket, execution: { name: 'delivery-test', directory: root, assignment: 'Test before local delivery' } }),
     ...(target ? { deliveryTarget: target } : {}),
     ...(input.environment === false ? {} : { environments: environmentPort(environment.tickets) }),
-    visualCapture: visual,
     acceptance: () => true, // ready still passes the Engine's strict evidence check; never grants delivery.
     now: () => new Date(clock).toISOString(),
   })
@@ -106,12 +100,18 @@ function harness(input: { repo?: Repositories; directory?: string; state?: strin
     engine.report(id, { state: 'failed', summary: 'Rework requested' }); engine.retryTicket(id)
     engine.assignmentStarted(id, assignment(id))
   }
-  function configureVisual(id: string) {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => key !== 'NODE_OPTIONS' && value !== undefined))
-    engine.configureVisual(id, { scenario: 'delivery', capture: { server: 'tpmcp', tool: 'capture_screenshot', arguments: { path: '{{path}}', scenario: 'default' } },
-      inspector: { executable, args: [join(here, '..', 'scripts', 'visual_inspector.py'), '--', JSON.stringify(env)] }, checks: ['nonblank', 'readable'], minimumFrames: 1 })
+  /** A real one-pixel PNG plus the sha256 a worker would report for it. */
+  const frameBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+  function writeFrame(relative = 'shots/frame-1.png') {
+    const filename = join(root, relative)
+    mkdirSync(dirname(filename), { recursive: true })
+    writeFileSync(filename, frameBytes)
+    return { path: relative, sha256: createHash('sha256').update(frameBytes).digest('hex') }
   }
-  return { repo, root, state, target, environment, engine, current, assignment, accept, contract, strict, run, grant, deliver, tamper, retry, configureVisual,
+  function recordVisual(id: string, verdict: 'passed' | 'failed' = 'passed') {
+    return engine.recordVisual(id, assignment(id), { verdict, reason: 'frame shows the delivery state', frames: [writeFrame()] })
+  }
+  return { repo, root, state, target, environment, engine, current, assignment, accept, contract, strict, run, grant, deliver, tamper, retry, recordVisual, writeFrame,
     advance: (milliseconds: number) => { clock += milliseconds } }
 }
 function delivered(result: DeliveryResult) {
@@ -198,7 +198,7 @@ describe('phase 2 D independent, version-bound delivery authorization', () => {
   it.each(['no strict', 'no evidence', 'visual requirement without evidence'] as const)('refuses %s despite a grant', async kind => {
     const target = localTarget(), h = harness({ target }), id = h.accept()
     if (kind === 'no evidence') h.engine.configureValidation(id, h.contract)
-    if (kind === 'visual requirement without evidence') { await h.strict(id); h.configureVisual(id) }
+    if (kind === 'visual requirement without evidence') { await h.strict(id); h.recordVisual(id, 'failed') }
     h.grant(id, 'push')
     refused(await h.deliver(id, 'push'), /strict|acceptance|evidence|validation|visual/i)
     expect(target.execute).not.toHaveBeenCalled()
@@ -410,30 +410,23 @@ describe('phase 2 D independent, version-bound delivery authorization', () => {
     expect(target.execute).toHaveBeenCalledTimes(1)
   })
 
-  it('delivers with real unittest plus visual evidence and rechecks visual files rather than trusting the saved verdict', async () => {
+  it('delivers with real unittest plus a recorded visual verdict and rechecks the frames rather than trusting the saved verdict', async () => {
     const target = localTarget(), h = harness({ target }), id = h.accept()
-    h.engine.configureValidation(id, h.contract); h.configureVisual(id)
-    h.engine.prepareVisualCapture(id)
-    expect(await h.engine.captureVisual(id, h.assignment(id), 'combined', 1)).toMatchObject({ status: 'captured', frames: 1 })
-    expect(await h.engine.readVisual(id, h.assignment(id))).toMatchObject({ passed: true, groups: 1 })
-    // Capture writes real files: run unit tests over the final workspace, not the pre-capture version.
+    h.engine.configureValidation(id, h.contract); h.recordVisual(id)
+    // The worker wrote a real frame before recording; run unit tests over the final workspace.
     await h.run(id); h.grant(id, 'push')
     delivered(await h.deliver(id, 'push'))
-    const visualEvidence = h.current(id).validation!.visual!.evidence!
-    expect(visualEvidence.groups?.[0]?.frames).toHaveLength(1)
-    const frame = visualEvidence.groups![0]!.frames![0]!
-    writeFileSync(join(h.root, VISUAL_EVIDENCE_DIR, frame.path), 'not a PNG any more')
+    const frames = h.current(id).validation!.visual!.frames
+    expect(frames).toHaveLength(1)
+    writeFileSync(join(h.root, frames[0]!.path), 'not a PNG any more')
     await h.run(id); h.grant(id, 'release')
     refused(await h.deliver(id, 'release'), /visual|frame|acceptance|fingerprint/i)
     expect(target.execute).toHaveBeenCalledTimes(1)
   }, 90_000)
 
-  it('requires unittest evidence even when real visual-only acceptance passed', async () => {
+  it('requires unittest evidence even when the worker recorded a passing visual verdict', async () => {
     const target = localTarget(), h = harness({ target }), id = h.accept()
-    h.engine.configureValidation(id); h.configureVisual(id)
-    h.engine.prepareVisualCapture(id)
-    expect(await h.engine.captureVisual(id, h.assignment(id), 'visual-only', 1)).toMatchObject({ status: 'captured', frames: 1 })
-    expect(await h.engine.readVisual(id, h.assignment(id))).toMatchObject({ passed: true, groups: 1 })
+    h.engine.configureValidation(id); h.recordVisual(id)
     h.grant(id, 'push')
     refused(await h.deliver(id, 'push'), /unittest|strict|contract|evidence/i)
     expect(target.execute).not.toHaveBeenCalled()
