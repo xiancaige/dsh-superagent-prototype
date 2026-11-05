@@ -442,7 +442,7 @@ export class Engine {
     this.testRuns.set(ticketId, controller)
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
-      const evidence = await runValidation(contract, binding, combined)
+      const evidence = await runValidation(contract, binding)
       combined.throwIfAborted()
       return this.repo.atomic(() => {
         const ticket = this.repo.tickets.get(ticketId)

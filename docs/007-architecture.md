@@ -431,7 +431,6 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/review-gate.spec.ts` | Independent review identity and forgery rejection, real fingerprints, ready/result/delivery gates and SQLite restoration |
 | `tests/phase2-acceptance-matrix.spec.ts` | Executable index of the Phase 2 A acceptance matrix and the four returned items: each row must name a real test title that still exists |
 | `tests/cqtest-validation.spec.ts` | CQTest report adapter: clean/fresh/complete acceptance, stale-report and doctored-count rejection, report re-check on re-validation, and Unreal-output fingerprint scope |
-| `tests/node-validation.spec.ts` | Real Node built-in test adapter structured events, required IDs, failure/skip/zero cases, timeout, cancellation and tamper rejection |
 | `tests/strict-validation.spec.ts` | Engine lifecycle gates, shared-thread closures, retries, worker tool binding and SQLite evidence restoration |
 | `tests/phase2c-exclusive.spec.ts` | Phase 2 C with injected PIDs and a throw-away git repository: the persisted lease and its heartbeat, a refused second holder, waiting and idling that keep it, the owner a restart keeps, the three release facts only, and the handover export that leaves the scene untouched |
 | `tests/phase2cd-export.spec.ts` | Phase 2 C handover export of a dirty git work tree: tracked, staged, every untracked file and binary reach the patch; bundle verified; tree untouched |

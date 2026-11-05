@@ -16,6 +16,7 @@ import { transient } from '../src/executor/dsh.ts'
 import { Engine, MemoryRepositories, type Candidate, type EngineOptions, type Policy, type Repositories, type Ticket } from '../src/core/index.ts'
 import type { DeliveryAttempt, DeliveryLevel, DeliveryResult } from '../src/core/delivery.ts'
 import { ticketed } from './fixtures/environment.ts'
+import { CQTEST_PASSING_ID, writeCqtestReport } from './fixtures/cqtest-report.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const executable = execFileSync('python', ['-I', '-S', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
@@ -188,8 +189,8 @@ describe('R3 editor-recovery cleanup proves the process is the one it started', 
 
 function workspace() {
   const root = directory('workspace')
-  writeFileSync(join(root, 'answer.py'), 'def answer():\n    return 42\n')
-  writeFileSync(join(root, 'test_delivery.py'), 'import unittest\nfrom answer import answer\nclass Delivery(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n')
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = () => 42\n')
+  writeCqtestReport(root)
   return root
 }
 function openStore(file: string) { const store = new Store(file); stores.add(store); return store }
@@ -232,7 +233,7 @@ function harness(input: { repo?: Repositories; directory?: string; state?: strin
     engine.assignmentStarted(id, assignment(id))
     return id
   }
-  const contract = { adapter: 'python-unittest' as const, executable, workspace: root, requiredTestIds: ['test_delivery.Delivery.test_answer'], timeoutMs: 10_000 }
+  const contract = { adapter: 'cqtest-report' as const, executable, workspace: root, requiredTestIds: [CQTEST_PASSING_ID], timeoutMs: 10_000 }
   async function run(id: string) {
     const evidence = await engine.runTicketTests(id, assignment(id))
     expect(evidence).toMatchObject({ passed: true, completed: true, testsRun: 1, failures: 0, errors: 0, skipped: 0 })
