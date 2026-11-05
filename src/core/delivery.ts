@@ -140,7 +140,7 @@ export class Deliveries extends EnginePart {
           const visual = ticket.validation.visual
           if (visual) {
             if (visual.verdict !== 'passed') throw new Error(`visual acceptance recorded as ${visual.verdict}`)
-            for (const frame of visual.frames) {
+            for (const frame of visual.frames ?? []) {
               const filename = isAbsolute(frame.path) ? frame.path : join(workspace!, frame.path)
               if (!existsSync(filename) || createHash('sha256').update(readFileSync(filename)).digest('hex') !== frame.sha256) {
                 throw new Error(`visual evidence frame ${frame.path} no longer matches its sha256`)

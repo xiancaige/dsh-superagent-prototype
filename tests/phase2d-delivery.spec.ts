@@ -416,7 +416,7 @@ describe('phase 2 D independent, version-bound delivery authorization', () => {
     // The worker wrote a real frame before recording; run unit tests over the final workspace.
     await h.run(id); h.grant(id, 'push')
     delivered(await h.deliver(id, 'push'))
-    const frames = h.current(id).validation!.visual!.frames
+    const frames = h.current(id).validation!.visual!.frames ?? []
     expect(frames).toHaveLength(1)
     writeFileSync(join(h.root, frames[0]!.path), 'not a PNG any more')
     await h.run(id); h.grant(id, 'release')
