@@ -95,11 +95,15 @@ describe('phase 2 C/D (b): a confirmed completion gives the environment back', (
     // Exactly one stop, and it ran while the ticket still held the lock (the stop precedes the release).
     expect(h.hosts.stops).toEqual([{ ticketId: first, failed: false, holdsAtStop: true }])
     expect(h.hosts.editors.has(first)).toBe(false)
-    expect(h.broker.view()).toMatchObject({ held: false, lastRelease: { reason: 'acceptance', ticketId: first } })
-    // The next ticket now enters.
+    // The released environment goes to the ticket that was waiting for it, so the release no longer leaves it free.
+    await vi.waitFor(() => expect(h.broker.view()).toMatchObject({ held: true, lastRelease: { reason: 'acceptance', ticketId: first } }))
+    expect(h.broker.view().holder?.id).toBe(second)
+    // The next ticket entered on that release and started, without a person's message.
+    expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second])
+    // A ticket accepted now is refused behind the waiter that now holds it.
     const third = h.accept('3')
-    expect(h.tickets.holds(third)).toBe(true)
-    expect(lockOf(state)!.holder.id).toBe(third)
+    expect(h.repo.tickets.get(third)!.validation?.blocked).toMatch(/held by ticket Fix 2/)
+    expect(lockOf(state)!.holder.id).toBe(second)
   })
 
   it('keeps the lock when the host’s acceptance is false, and releases once it passes', async () => {
@@ -443,5 +447,68 @@ describe('phase 2 C/D (f): Engine.acquireEnvironment is the operator’s explici
     h.foreign(300).acquire({ kind: 'session', id: 'main-session', label: 'the main Session' })
     expect(() => acquireEnvironment(h.engine, first)).toThrow(/held by session the main Session/)
     expect(lockOf(state)!.holder.id).toBe('main-session')
+  })
+})
+
+describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts once it is released', () => {
+  it('takes the environment and launches the queued Assignment after the holder completes', async () => {
+    const state = dirWith()
+    const h = lifecycleHarness(state)
+    const first = h.accept('1')
+    h.settle()
+    // Accepted while the first ticket holds the environment: recorded, blocked, and never launched.
+    const second = h.accept('2')
+    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.launches).toHaveLength(0)
+    expect(h.tickets.holds(second)).toBe(false)
+    // The holder completes and releases: the waiting ticket starts on its own, without a person's message.
+    h.ready(first)
+    await vi.waitFor(() => expect(h.tickets.holds(second)).toBe(true))
+    expect(h.repo.tickets.get(second)!.validation?.blocked).toBeUndefined()
+    expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second])
+    expect(lockOf(state)!.holder.id).toBe(second)
+    expect(h.raised('ticket.exclusive').at(-1)?.data).toMatchObject({ ticketId: second, action: 'acquired' })
+    // It is the latest ticket's own first Assignment that was launched, and only once.
+    expect(h.launches[0]![1]).toBe(h.repo.tickets.get(second)!.assignments.at(-1)!.id)
+    h.settle()
+    expect(h.repo.tickets.get(second)!.assignments.at(-1)!.state).toBe('running')
+    expect(h.launches).toHaveLength(0)
+  })
+
+  it('hands a released environment to the oldest waiter only, and the rest keep waiting', async () => {
+    const state = dirWith()
+    const h = lifecycleHarness(state)
+    const first = h.accept('1')
+    h.settle()
+    const second = h.accept('2')
+    const third = h.accept('3')
+    expect([second, third].map(id => !!h.repo.tickets.get(id)!.validation?.blocked)).toEqual([true, true])
+    h.ready(first)
+    // Only the oldest waiter takes it; the other keeps waiting rather than failing.
+    await vi.waitFor(() => expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second]))
+    expect(h.tickets.holds(second)).toBe(true)
+    expect(h.tickets.holds(third)).toBe(false)
+    // The refused third ticket still names its own blocker: the holder it was refused for, not the ticket that just took it.
+    expect(h.repo.tickets.get(third)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    // Nothing displaced the oldest waiter for the other one.
+    expect(lockOf(state)!.holder.id).toBe(second)
+    expect(h.launches).toHaveLength(1)
+  })
+
+  it('starts a waiter only for a release, exactly once, and not for a stop that released nothing', async () => {
+    const state = dirWith()
+    const h = lifecycleHarness(state)
+    const first = h.accept('1')
+    h.settle()
+    const blocked = h.accept('2')
+    expect(h.repo.tickets.get(blocked)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    // A stop of the holder's ticket that released nothing (the holder is not that ticket) starts no waiter.
+    h.engine.stopTicket(first)
+    await vi.waitFor(() => expect(h.tickets.holds(blocked)).toBe(true))
+    expect(h.launches.map(([ticket]) => ticket.id)).toEqual([blocked])
+    // A later release with no waiter leaves the environment free, and starts nothing.
+    h.engine.stopTicket(blocked)
+    await vi.waitFor(() => expect(h.broker.view().held).toBe(false))
+    expect(h.launches).toHaveLength(1)
   })
 })

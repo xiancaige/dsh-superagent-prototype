@@ -233,6 +233,8 @@ export class Engine {
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     if (!environments.holds(ticketId)) throw new UserError('notHolding')
     const result = await environments.handover(ticketId)
+    // A handed-over environment is free for the tickets that were refused it at acceptance.
+    if (result.handedOver) this.tickets.resumeEnvironmentWaiter()
     this.raise('ticket.handover', { ticketId, handedOver: result.handedOver, ...result.export ? { export: result.export } : {},
       ...result.error ? { error: result.error } : {} })
     return result
@@ -271,6 +273,8 @@ export class Engine {
         throw error
       }
       this.raise('ticket.exclusive', { ticketId, action: 'acquired' })
+      // An operator took the environment for a ticket that waited for it at acceptance: it starts now.
+      this.tickets.resumeBlocked(ticketId)
     }
     return { held: true }
   }
@@ -290,6 +294,7 @@ export class Engine {
     if (!environments.holds(ticketId)) throw new UserError('notHolding')
     try {
       const released = await environments.end(ticketId, { by: ticket.ended.by, outcome: ticket.ended.outcome }, ticket.ended.outcome === 'completed')
+      if (released) this.tickets.resumeEnvironmentWaiter()
       return { released }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -312,8 +317,9 @@ export class Engine {
     if (!environments?.end) return
     const ended = ticket.ended ? { by: ticket.ended.by, outcome: ticket.ended.outcome } : fallback
     void environments.end(ticket.id, ended, false)
-      .catch(error => this.raise('ticket.handover', { ticketId: ticket.id, handedOver: false,
-        error: `The environment release failed: ${error instanceof Error ? error.message : String(error)}` }))
+      .then(released => { if (released) this.tickets.resumeEnvironmentWaiter() },
+        error => this.raise('ticket.handover', { ticketId: ticket.id, handedOver: false,
+          error: `The environment release failed: ${error instanceof Error ? error.message : String(error)}` }))
   }
   /**
    * A person retries a ticket whose worker reported failed or blocked (or whose input delivery failed): the stalled
