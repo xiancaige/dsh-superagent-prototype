@@ -5,7 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { assertTicketDesignApproved } from '../core/design.ts'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
+import { blockedForEnvironment, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
@@ -45,12 +45,20 @@ class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
   'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
 /**
+ * True when an error says another holder has the TP environment: the launch then waits for that holder's release rather
+ * than failing the ticket. Matched by name, so the executor needs no import of the host's broker.
+ */
+export function isEnvironmentHeld(error: unknown): boolean {
+  const name = (error as { name?: unknown } | undefined)?.name
+  return name === 'EnvironmentHeld' || name === 'EnvironmentHeldBySelf'
+}
+/**
  * True when an error represents a transient network or model-provider failure: an HTTP 408, 429, or 5xx status, or a
  * connection that was refused, reset, timed out, or could not resolve its host.
  */
 export function transient(error: unknown): boolean {
   // A held environment is a decision, not a network failure: its message names a pid that must not read as an HTTP status.
-  if ((error as { name?: unknown } | undefined)?.name === 'EnvironmentHeld') return false
+  if (isEnvironmentHeld(error)) return false
   const status = (error as { status?: unknown } | undefined)?.status
   if (typeof status === 'number') return status === 408 || status === 429 || status >= 500
   const text = error instanceof Error ? `${error.name} ${error.message} ${String((error as { code?: unknown }).code ?? '')}` : String(error)
@@ -62,9 +70,12 @@ const ticketWorktreeName = (name: string, id: string): string => `${WorktreeName
 export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
-  /** Where the Executor reports what happened to Assignments and Inputs. */
-  readonly engine: Pick<EngineForExecutor, 'deferDesignResume' | 'ensureEnvironment' | 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
-    | 'assignmentInterrupted'>
+  /**
+   * Where the Executor reports what happened to Assignments and Inputs. `holdsEnvironment` is optional for a host without a
+   * TP environment, where nothing queues on it.
+   */
+  readonly engine: Omit<Pick<EngineForExecutor, 'deferDesignResume' | 'ensureEnvironment' | 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
+    | 'assignmentInterrupted'>, 'holdsEnvironment' | 'environmentRefused'> & Partial<Pick<EngineForExecutor, 'holdsEnvironment' | 'environmentRefused'>>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
@@ -271,6 +282,11 @@ export class DshExecutor implements Executor {
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
+    // A ticket still refused the environment changes holder only through a release: its launch would only be refused again, and
+    // the release enqueues it then (see `Tickets.resumeEnvironmentWaiter`). This keeps the durable queue free of refusals the
+    // host already knows about; a host that cannot say whether the ticket holds it (no TP environment) keeps the old behaviour.
+    const holds = this.host.engine.holdsEnvironment
+    if (blockedForEnvironment(ticket) && holds && !holds.call(this.host.engine, ticket.id)) return
     this.host.effects.enqueue('launch', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id })
   }
   /** Enqueues a `delivery` effect to steer pending inputs into `ticket`'s running worker session. */
@@ -287,9 +303,16 @@ export class DshExecutor implements Executor {
       // A failed prepare command is not retried automatically because an existing directory counts as prepared, so retrying
       // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
       // ticket is marked failed and waits until new human input or an explicit retry arrives.
+      // A refused environment is neither: the ticket goes back to waiting for the holder's release, which starts this same
+      // Assignment, so it is never reported failed for something the ticket cannot fix.
       if (this.host.closing() || error instanceof Later) throw error
-      if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
-      this.launchFailed(ticketId, assignmentId, error)
+      if (isEnvironmentHeld(error)) {
+        this.host.engine.report(ticketId, { state: 'blocked', summary: `Waiting for the TP environment: ${String(error)}` })
+        // The block is what queues it: if the host kept no validation block, this one marks the ticket for the release.
+        this.host.engine.environmentRefused?.(ticketId, assignmentId, error, String(error))
+      }
+      else if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
+      else this.launchFailed(ticketId, assignmentId, error)
     } finally { this.slots.free(ticketId) }
   }
   /**
