@@ -9,7 +9,7 @@ import { workerSessionId } from '../../executor/dsh.ts'
 import type { Store } from '../store.ts'
 import { attribute, markdown, plain, preview, readable } from './text.ts'
 
-export type LinkTarget = (channel: ChannelRef) => ChannelLink
+export type LinkTarget = (channel: ChannelRef, thread?: string) => ChannelLink
 export interface ViewHost { store: Store; sources: SourceRegistry; links: LinkTarget }
 export const page = <T>(items: T[], offset: number, limit: number) => ({ items: items.slice(offset, offset + limit), total: items.length, next_offset: offset + limit < items.length ? offset + limit : null })
 const DAY = 86_400_000
@@ -176,9 +176,12 @@ export function threadSummary(view: Snapshot, thread: Thread) {
     facts: (thread.meta.facts ?? {}) as ThreadFacts }
 }
 export type ThreadSummaryView = ReturnType<typeof threadSummary>
-/** Resolves a channel link, preferring the specific trigger URL when the source link references a trigger. */
-export function channelLink({ store, links }: ViewHost, channel: ChannelRef) {
-  const { url, label, triggerId } = links(channel)
+/**
+ * Resolves a channel link, preferring the specific trigger URL when the source link references a trigger. `thread` is the
+ * Thread the link opens on a Source answered in the panel; without it, such a Channel has the empty link.
+ */
+export function channelLink({ store, links }: ViewHost, channel: ChannelRef, thread?: string) {
+  const { url, label, triggerId } = links(channel, thread)
   return { source: channel.source, url: (triggerId && store.triggers.get(triggerId)?.url) || url, label }
 }
 /** Parses stored assessment audit metadata, tolerating fields omitted or shaped differently by older versions. */

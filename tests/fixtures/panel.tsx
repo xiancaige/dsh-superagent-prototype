@@ -41,8 +41,22 @@ export async function mount(dictionary: Record<string, string> = zh) {
   await act(async () => { root!.render(<Panel t={translator(dictionary)} />) })
   await settle()
 }
-export async function remount(dictionary: Record<string, string> = zh) { unmount(); await mount(dictionary) }
+/** Mount the panel at the address a Channel's link names, as a new tab of the Web UI loads it; `unmount` returns the address home. */
+export async function mountAt(address: string, dictionary: Record<string, string> = zh) {
+  const panel = createRoot((container = document.createElement('div')))
+  document.body.append(container)
+  window.history.replaceState(null, '', address)
+  root = panel
+  await act(async () => { panel.render(<Panel t={translator(dictionary)} />) })
+  await settle()
+}
+/** Unmount the panel and return the address home, as the cleanup of a test that mounted at another address does. */
+export function unmountPanel() {
+  unmount()
+  window.history.replaceState(null, '', '/')
+}
 
+export async function remount(dictionary: Record<string, string> = zh) { unmount(); await mount(dictionary) }
 export const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)]
 const CONTROLS = 'button, [role="button"], [role="tab"], [role="switch"], a'
 export function find(name: string, selector = CONTROLS): HTMLElement {

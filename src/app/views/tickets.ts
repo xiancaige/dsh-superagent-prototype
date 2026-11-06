@@ -41,10 +41,19 @@ export function ticketList(host: ViewHost, stage: 'open' | TicketStage['stage'],
   return { ...result, items: result.items.map(ticket => ticketRow(view, ticket)) }
 }
 export type TicketListView = ReturnType<typeof ticketList>
+/**
+ * The Thread a Channel's answer link opens: the Thread of the Trigger the link is about, as a Source answered in the panel
+ * links its own Thread page rather than an external page, or the Ticket's first Thread when the Channel names no Trigger.
+ */
+function replyThread(view: Snapshot, ticket: Ticket, channel: NonNullable<Ticket['channels'][number]>): string | undefined {
+  const trigger = ticket.origin.triggerIds.map(id => view.store.triggers.get(id))
+    .find(item => item && threadKey(item.threads[0]!) === channel.thread)
+  return channel.thread ?? (trigger ? threadKey(trigger.threads[0]!) : view.threadsOf(ticket.id)[0]?.key)
+}
 export function ticketRow(view: Snapshot, ticket: Ticket) {
   const line = ticketLine(view, ticket)
   const channel = ticket.channels[0]
-  const reply = line.stage === 'person' && channel ? channelLink(view, channel) : undefined
+  const reply = line.stage === 'person' && channel ? channelLink(view, channel, replyThread(view, ticket, channel)) : undefined
   return { ...line, ...reply ? { reply } : {} }
 }
 /** Executor slot utilization: `running` worker Sessions in an active turn (which occupy slots and are interrupted by a restart), and tickets `queued` for a slot. */
@@ -73,7 +82,7 @@ export function ticketDetail(host: ViewHost, id: string) {
   const human = ticket.mandate.basis.via !== 'bot'
   return { ...ticketLine(view, ticket), mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
-    channels: ticket.channels.map(channel => channelLink(view, channel)),
+    channels: ticket.channels.map(channel => channelLink(view, channel, replyThread(view, ticket, channel))),
     decision: decision ? decisionView(view, decision) : undefined,
     // Every started Assignment ran in the ticket's one worker Session. A running assignment whose worker reported a non-progress state has finished its turn unless a human response resumed the ticket.
     assignments: ticket.assignments.map(assignment => ({ ...assignment, ...assignment.startedAt ? { ref: workerSessionId(ticket.id) } : {},

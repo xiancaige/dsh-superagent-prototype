@@ -9,7 +9,7 @@ import { ticketMark } from './marks.ts'
 import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './locales.ts'
 import { OverviewPage } from './overview.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route,
+import { HOME, TABS, addressRoute, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route,
   type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
@@ -169,9 +169,21 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   </div>
 }
 
+/**
+ * The page the address opens: the Thread page it names; home at the address home, which no page is remembered from;
+ * otherwise the route remembered from the last visit. A page that changes the address returns it home, so a page with no
+ * address of its own (such as a Ticket) still reloads on its own route, as the address alone never opens it.
+ */
+function openingLocation(): Location {
+  const pathname = typeof window === 'undefined' ? '/' : window.location.pathname
+  if (pathname === '/') return { route: HOME, stack: [] }
+  const route = addressRoute(pathname)
+  return route ? { route, stack: [] } : initialLocation()
+}
+
 /** Root panel component managing route history and shared panel state. */
 export function App({ t, openSession, deploymentForm }: AppProps) {
-  const [location, setLocation] = useState(initialLocation)
+  const [location, setLocation] = useState(openingLocation)
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
   const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) =>
@@ -182,7 +194,8 @@ export function App({ t, openSession, deploymentForm }: AppProps) {
   const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
-  return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
+  return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} route={location.route}
+    backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
     <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
   </PanelProvider>
 }

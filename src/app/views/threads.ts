@@ -40,7 +40,7 @@ export function threadDetail(host: ViewHost, key: string, before: string | undef
   const more = triggers.length > limit
   const shown = more ? triggers.slice(1) : triggers
   const first = store.read.firstTrigger(key)
-  const url = attribute(thread.meta.url) ?? first?.url ?? (first?.channel ? channelLink(view, first.channel).url : undefined)
+  const url = attribute(thread.meta.url) ?? first?.url ?? (first?.channel ? channelLink(view, first.channel, thread.key).url : undefined)
   // `context` lists tickets whose Executor follows this thread for context only (messages reach them without granting authority).
   return { ...threadSummary(view, thread), url, context: thread.context ?? [],
     correlated: thread.correlated.map(other => {
