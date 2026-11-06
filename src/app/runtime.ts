@@ -35,6 +35,7 @@ import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
+import { Mirror } from './mirror.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
@@ -296,7 +297,9 @@ export class Runtime extends Service implements SourceHost {
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat (see `Mirror`).
+      const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, mirror, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       // Phase 2 C: the environment is composed before any editor recovery, which borrows its one lock.
