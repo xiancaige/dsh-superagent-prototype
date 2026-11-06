@@ -363,12 +363,24 @@ export function readUntil(ticket: Pick<Ticket, 'assignments'>, progress = true):
   const report = ticket.assignments.findLast(assignment => assignment.report && (progress || assignment.report.state !== 'progress'))?.report
   return [report?.at ?? '', ...ticket.assignments.map(assignment => assignment.idleAt ?? '')].reduce((a, b) => a > b ? a : b)
 }
+/** The prefix the host writes on the block of a ticket refused the TP environment (see `Tickets.create`). */
+export const ENVIRONMENT_BLOCK = 'TP environment block: '
+/**
+ * Whether the TP environment, not the worker, is why a ticket is stalled: it was refused the environment or a launch
+ * asked for it again and was refused, and nothing but another holder's release can move it. Such a ticket is queued for
+ * the environment, so neither a person's wait nor the hold-back of automated inputs may treat it as answered work.
+ */
+export function blockedForEnvironment(ticket: Pick<Ticket, 'validation'>): boolean {
+  return !!ticket.validation?.blocked?.startsWith(ENVIRONMENT_BLOCK)
+}
 /**
  * Whether a ticket waits for a person: its latest Assignment reported blocked or failed, and no person's message reached it
- * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it.
+ * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it. A ticket
+ * waiting for the TP environment is not waiting for a person: only another holder's release starts it.
  */
 export function waitsForPerson(ticket: Ticket): boolean {
   const report = latestAssignment(ticket)?.report
   if (report?.state !== 'blocked' && report?.state !== 'failed') return false
+  if (blockedForEnvironment(ticket)) return false
   return !ticket.inputs.some(input => input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
 }
