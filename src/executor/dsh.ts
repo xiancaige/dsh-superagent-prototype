@@ -686,7 +686,9 @@ export class DshExecutor implements Executor {
     const handedOff = (stored: Ticket) => {
       const assignment = runningAssignment(stored), report = assignment?.report
       const since = !!assignment?.deliveredAt && !!report && assignment.deliveredAt >= report.at
-      return ((report?.state === 'ready' || !!stored.attention) && !since) || waitsForPerson(stored)
+      // A person's reply typed into the worker Session after the report answers its question, which no Input records.
+      const replied = !!report && !!this.personal.get(ticket.id) && this.personal.get(ticket.id)! > report.at
+      return !replied && (((report?.state === 'ready' || !!stored.attention) && !since) || waitsForPerson(stored))
     }
     const before = live()
     if (!before || this.host.closing()) return
@@ -734,7 +736,8 @@ export class DshExecutor implements Executor {
     const said = [text, stopped].filter(Boolean).join('\n\n')
     this.host.store.atomic(() => {
       const before = latestReport(current)?.summary ?? ''
-      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before })
+      // The turn ended without a newer question (handedOff would have returned), so an open question was answered: clear it.
+      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
       if (said) this.relay(resultRelay(updated, 'waiting', said))
       else if (!before.trim()) {
