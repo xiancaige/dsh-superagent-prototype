@@ -54,5 +54,10 @@ export const KV = {
    */
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
-    seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+    seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:'),
+    /** A ticket that started outside Feishu, mirrored into a Feishu topic: the topic's root message, by ticket and by message. */
+    mirror: family<FeishuMirror, [ticket: string]>('feishu-mirror:'),
+    mirrorRoot: family<FeishuMirror, [message: string]>('feishu-mirror-root:') },
 }
+/** Where a ticket's Feishu topic is: its root message, and the ticket's own Thread that replies in the topic are rewritten to. */
+export interface FeishuMirror { ticketId: string; chatId: string; messageId: string; direct: boolean; thread: { source: string; id: string } }

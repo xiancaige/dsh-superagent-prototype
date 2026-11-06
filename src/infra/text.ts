@@ -14,6 +14,16 @@ export function checkedImText(text: string): string {
   if (count > IM_WORDS) throw new Error(`IM message has ${count} words; maximum is ${IM_WORDS}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
   return text
 }
+/** Shortens `text` to fit the IM limit for a mirrored copy: the whole text when it fits, else its first words and a pointer to the panel. */
+export function imSummary(text: string, limit = IM_WORDS - 10, tail = '…（全文见本地面板）'): string {
+  if (wordCount(text) <= IM_WORDS) return text
+  let count = 0, out = ''
+  for (const segment of words.segment(text)) {
+    if (segment.isWordLike && ++count > limit) break
+    out += segment.segment
+  }
+  return out.trimEnd() + tail
+}
 export const fill = (template: string, values: Record<string, string>): string => template.replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? '')
 /** Case-insensitive comparison for GitHub logins and repository names. */
 export const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
