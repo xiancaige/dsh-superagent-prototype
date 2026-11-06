@@ -52,7 +52,7 @@ const RouteItemSchema = z.object({
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
-  workspace_role: z.enum(['game', 'ops']).nullish().describe('accept: ops for tooling/AI files.'),
+  workspace_role: z.enum(['game', 'ops']).nullish().describe('accept: ops for tooling/AI files; default game.'),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
