@@ -170,14 +170,12 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
 }
 
 /**
- * The page the address opens: the Thread page it names; home at the address home, which no page is remembered from;
- * otherwise the route remembered from the last visit. A page that changes the address returns it home, so a page with no
- * address of its own (such as a Ticket) still reloads on its own route, as the address alone never opens it.
+ * The page the address opens: the Thread page it names, otherwise the route remembered from the last visit. A page that
+ * changes the address returns it home, so a page with no address of its own (such as a Ticket) still reloads apart from
+ * a Thread page, which the address names.
  */
 function openingLocation(): Location {
-  const pathname = typeof window === 'undefined' ? '/' : window.location.pathname
-  if (pathname === '/') return { route: HOME, stack: [] }
-  const route = addressRoute(pathname)
+  const route = typeof window === 'undefined' ? undefined : addressRoute(window.location.pathname)
   return route ? { route, stack: [] } : initialLocation()
 }
 
