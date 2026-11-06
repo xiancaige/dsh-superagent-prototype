@@ -145,14 +145,11 @@ it('opens the Thread page its address names, keeps the address of the page on sc
   await mountAt(threadPath(key))
   expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('这个文案好奇怪')
-  // Another page returns the address home: a reload at home opens home rather than the Thread page left behind, and the
-  // Ticket page has no address of its own, so it is remembered instead.
+  // Another page returns the address home, so the panel keeps loading at home rather than at a page no server answers.
   await click(zh['tab.execution'])
   expect(window.location.pathname).toBe('/')
   await remount()
-  expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
-  await remount()
-  expect(document.querySelector('.dt-status-line .dt-stage')?.textContent).toBe(zh.executingLabel)
+  expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
   // A Source answered in the panel links its Thread page there, and a Channel that names no page offers no link.
   const t1 = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
