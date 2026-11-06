@@ -239,6 +239,17 @@ export class Engine {
       ...result.error ? { error: result.error } : {} })
     return result
   }
+  /** Whether the ticket holds the TP environment now; a deployment without one holds nothing, so nothing queues on it. */
+  holdsEnvironment(ticketId: string): boolean {
+    return !!this.options.environments?.holds(ticketId)
+  }
+  /**
+   * Phase 2 C: a launch was refused the environment another holder has. The ticket goes back to waiting for it, so the
+   * holder's release starts that same Assignment instead of a person having to retry work nothing was wrong with.
+   */
+  environmentRefused(ticketId: string, assignmentId: string, error: unknown, reason?: string): Ticket | undefined {
+    return this.tickets.environmentRefused(ticketId, assignmentId, error, reason)
+  }
   /**
    * Phase 2 C: a worker may only continue (launch again, take a new message, run a host tool) while its ticket holds the
    * environment. After a person's handover or a lost lease it takes the lock again here, which resumes its own record or
@@ -619,4 +630,4 @@ export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'deferDesignResume' | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply' | 'runTicketTests'
-  | 'recordVisual' | 'deliverTicket' | 'ensureEnvironment'>
+  | 'recordVisual' | 'deliverTicket' | 'ensureEnvironment' | 'holdsEnvironment' | 'environmentRefused'>

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EnvironmentHeld, EXCLUSIVITY_FILE, readLease } from '../src/app/environment-exclusive.ts'
+import { waitsForPerson } from '../src/core/index.ts'
 import { readinessOf, TpEditorRecovery, type EditorProcess, type ReadinessCheck, type TpEditorEnvironment } from '../src/app/editor-recovery.ts'
 import { acquireEnvironment, ensureEnvironment, HOST, lifecycleHarness, SELF_PID } from './fixtures/lifecycle-harness.ts'
 import { broker } from './fixtures/environment.ts'
@@ -510,5 +511,26 @@ describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts
     h.engine.stopTicket(blocked)
     await vi.waitFor(() => expect(h.broker.view().held).toBe(false))
     expect(h.launches).toHaveLength(1)
+  })
+
+  it('starts a waiter whose launch was refused rather than reporting it failed', async () => {
+    const state = dirWith()
+    const h = lifecycleHarness(state)
+    const first = h.accept('1')
+    h.settle()
+    const second = h.accept('2')
+    const assignment = h.repo.tickets.get(second)!.assignments.at(-1)!.id
+    // A launch effect queued before the refusal runs anyway (a restart does this): its `EnvironmentHeld` must not read as the
+    // worker failing, because nothing the ticket did was wrong and no person has anything to answer.
+    const held = new EnvironmentHeld(lockOf(state)!)
+    expect(h.engine.environmentRefused(second, assignment, held)).toBeTruthy()
+    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/^TP environment block: .*held by ticket Fix 1/)
+    // The ticket is queued for the environment, not waiting for a person, so automated input is not held back from it.
+    expect(waitsForPerson(h.repo.tickets.get(second)!)).toBe(false)
+    // The holder's release starts that same Assignment, and no retry by a person was needed.
+    h.ready(first)
+    await vi.waitFor(() => expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second]))
+    expect(h.launches[0]![1]).toBe(assignment)
+    expect(h.repo.tickets.get(second)!.validation?.blocked).toBeUndefined()
   })
 })

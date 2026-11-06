@@ -2,7 +2,8 @@
 import { key } from './ids.ts'
 import { assertTicketValidated } from './validation.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import { ENVIRONMENT_BLOCK, blockedForEnvironment, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey,
+  waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
@@ -27,6 +28,8 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
  */
 const acceptedFirst = (a: Ticket, b: Ticket): number =>
   a.createdAt.localeCompare(b.createdAt) || (a.assignments[0]?.id ?? '').localeCompare(b.assignments[0]?.id ?? '')
+/** The block a refused environment leaves on a ticket: the prefix {@link blockedForEnvironment} recognizes, whatever refused it. */
+const environmentBlock = (error: unknown): string => `${ENVIRONMENT_BLOCK}${error instanceof Error ? error.message : String(error)}`
 
 /**
  * Manages each ticket's lifecycle: creates the ticket for an accept decision with its Mandate, Subscriptions, and first
@@ -61,7 +64,7 @@ export class Tickets extends EnginePart {
     let blocked: string | undefined
     if (environments) {
       try { environments.acquire(id, ticket.title) } catch (error) {
-        blocked = `TP environment block: ${error instanceof Error ? error.message : String(error)}`
+        blocked = environmentBlock(error)
       }
     }
     const assignment = this.newAssignment(ticket)
@@ -83,25 +86,48 @@ export class Tickets extends EnginePart {
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
   /**
-   * Whether the environment is why a ticket waits: it was refused at acceptance and its first Assignment has not started,
-   * so the block is what queues it rather than a person's report, a design approval, or a failed launch.
+   * Whether the environment is why a ticket waits: it was refused the environment, and the Assignment that would start it
+   * never started, so the block queues it instead of a person's report, a design approval, or a failed launch. The first
+   * Assignment is the one an acceptance refusal leaves queued; a later launch refusal is recorded only while that launch is
+   * still pending, so a worker that already started is never a queued launch.
    */
   private blockedForEnvironment(ticket: Ticket): boolean {
-    if (!ticket.validation?.blocked || ticket.assignments.length > 1) return false
+    if (!blockedForEnvironment(ticket) || ticket.assignments.length > 1) return false
     const first = ticket.assignments[0]
     return !!first && first.state === 'pending' && !first.startedAt
   }
   /**
-   * The ticket got the environment it was refused at acceptance (see `Tickets.create`): clear the block and start the
-   * Assignment that waited for it.
-   * @returns whether the ticket now runs; false when it is not waiting for the environment, waits for a person, or holds nothing.
+   * A launch was refused the environment another holder has: the ticket goes back to waiting for it, so the release
+   * that frees the environment starts the same Assignment (see `resumeEnvironmentWaiter`). It is never left with a
+   * `failed` report, which would ask a person to retry work nothing was wrong with.
+   * @returns the blocked ticket, or undefined when the ticket no longer waits for that Assignment or already holds the environment.
+   */
+  environmentRefused(ticketId: string, assignmentId: string, error: unknown, reason?: string): Ticket | undefined {
+    return this.repo.atomic(() => {
+      const ticket = this.repo.tickets.get(ticketId)
+      if (!ticket || !liveTicket(ticket)) return undefined
+      const latest = latestAssignment(ticket)
+      if (!latest || latest.id !== assignmentId || latest.state !== 'pending') return undefined
+      const block = environmentBlock(error)
+      if (ticket.validation?.blocked === block) return ticket
+      ticket.validation = { ...ticket.validation, enabled: ticket.validation?.enabled ?? true, blocked: block }
+      ticket.updatedAt = this.now()
+      this.repo.tickets.save(ticket)
+      this.emit('ticket.exclusive', { ticketId, action: 'refused', reason: reason ?? block })
+      return ticket
+    })
+  }
+  /**
+   * The ticket got the environment it was refused: clear the block and start the Assignment that waited for it. A ticket
+   * that is waiting for the environment is never waiting for a person, since only a release moves it.
+   * @returns whether the ticket now runs; false when it does not wait for the environment or holds nothing.
    */
   resumeBlocked(ticketId: string): boolean {
     const environments = this.environments()
     if (!environments) return false
     return this.repo.atomic(() => {
       const ticket = this.require(ticketId)
-      if (!liveTicket(ticket) || !this.blockedForEnvironment(ticket) || waitsForPerson(ticket) || !environments.holds(ticketId)) return false
+      if (!liveTicket(ticket) || !this.blockedForEnvironment(ticket) || !environments.holds(ticketId)) return false
       delete ticket.validation!.blocked
       ticket.updatedAt = this.now()
       this.repo.tickets.save(ticket)
@@ -119,8 +145,7 @@ export class Tickets extends EnginePart {
   resumeEnvironmentWaiter(): string | undefined {
     const environments = this.environments()
     if (!environments) return undefined
-    const waiting = this.repo.tickets.open().filter(ticket => this.blockedForEnvironment(ticket) && !waitsForPerson(ticket))
-      .sort(acceptedFirst)[0]
+    const waiting = this.repo.tickets.open().filter(ticket => this.blockedForEnvironment(ticket)).sort(acceptedFirst)[0]
     if (!waiting) return undefined
     try {
       this.repo.atomic(() => environments.acquire(waiting.id, waiting.title))
