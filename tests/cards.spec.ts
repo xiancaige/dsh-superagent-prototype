@@ -116,10 +116,12 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
 ]
 const textOf = (file: string) => file === '*' ? composePrompt(defaultPrompts(), 'orchestrator') + composePrompt(defaultPrompts(), 'worker')
   : file.startsWith('skill ') ? bundledSkills[file.slice(6) as 'github' | 'feishu'].content : promptFile(file)
+/** A phrase as the model reads it, with whitespace collapsed, so a says check matches across a rewrapped line. */
+const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 it.each(RULES)('%s (%s)', (_rule, file, says, gone = []) => {
   const text = textOf(file)
-  for (const words of says) expect(text).toContain(words)
-  for (const words of gone) expect(text.toLowerCase()).not.toContain(words.toLowerCase())
+  for (const words of says) expect(flat(text)).toContain(flat(words))
+  for (const words of gone) expect(text.toLowerCase()).not.toContain(flat(words).toLowerCase())
 })
 
 it('keeps each role\'s own instructions short', () => {
