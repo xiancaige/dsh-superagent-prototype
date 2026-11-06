@@ -43,12 +43,8 @@ export async function mount(dictionary: Record<string, string> = zh) {
 }
 /** Mount the panel at the address a Channel's link names, as a new tab of the Web UI loads it; `unmount` returns the address home. */
 export async function mountAt(address: string, dictionary: Record<string, string> = zh) {
-  const panel = createRoot((container = document.createElement('div')))
-  document.body.append(container)
   window.history.replaceState(null, '', address)
-  root = panel
-  await act(async () => { panel.render(<Panel t={translator(dictionary)} />) })
-  await settle()
+  await mount(dictionary)
 }
 /** Unmount the panel and return the address home, as the cleanup of a test that mounted at another address does. */
 export function unmountPanel() {

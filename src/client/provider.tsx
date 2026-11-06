@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { createPortal } from 'react-dom'
 import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
 import type { Route } from './route.ts'
+import { threadPath } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
 
@@ -71,11 +72,28 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
+/**
+ * Keep the address naming the Thread page on screen, so a Channel's `/orchestrator/threads/<key>` link opens that page,
+ * and a page with no address of its own (such as a Ticket) returns it home. The browser loads the panel on the root page
+ * with `<base href="./">`, since dsh-superagent cannot serve a page of its own at that address.
+ */
+function useThreadAddress(route: Route | undefined): void {
+  const page = route?.page
+  const id = route?.id
+  useEffect(() => {
+    if (typeof history === 'undefined') return
+    const wanted = page === 'trigger' && id !== undefined ? threadPath(id) : '/'
+    if (window.location.pathname !== wanted) history.replaceState(history.state, '', wanted)
+  }, [page, id])
+}
+export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', route, children }: {
   t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
+  /** The page on screen, whose address the panel keeps; a provider outside a page passes none. */
+  route?: Route | undefined
   children: ReactNode
 }) {
+  useThreadAddress(route)
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
