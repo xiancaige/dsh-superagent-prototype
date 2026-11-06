@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
-import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
+import { masterPrompt, workerPrompt, opsWorkerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
 import { environmentLines, type Variable } from './execution-environment.ts'
 import { promptsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
@@ -21,7 +21,7 @@ export const SKILL_PREFIX = 'dsh-superagent-'
 const SkillNameSchema = z.string().regex(SKILL_NAME).refine(name => !(Object.keys(sourceSkills) as string[]).includes(name),
   'This name belongs to a built-in skill')
 /** The built-in parts a team may override, by key: both roles' parts, the Source skills, and the generated parts' templates. */
-const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/subscriptions', 'runtime/replies',
+const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/worker/ops', 'runtime/subscriptions', 'runtime/replies',
   'runtime/dispatch', 'runtime/work', 'runtime/admission', 'runtime/handoff/orchestrator', 'runtime/handoff/worker', 'runtime/environment',
   'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github'] as const
 export type PartKey = typeof PART_KEYS[number]
@@ -55,6 +55,7 @@ let parts: Readonly<Record<PartKey, BuiltInPart>> | undefined
 export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts ??= {
   'runtime/shared': { roles: BOTH, text: sharedPrompt }, 'runtime/orchestrator': { roles: MAIN, text: masterPrompt },
   'runtime/worker': { roles: WORKER, text: workerPrompt },
+  'runtime/worker/ops': { roles: WORKER, text: opsWorkerPrompt },
   'runtime/subscriptions': { roles: BOTH, text: `## subscriptions\n${guides.subscriptions}` },
   'runtime/replies': { roles: BOTH, text: `## replies\n${guides.replies}` },
   'runtime/dispatch': { roles: MAIN, text: `## dispatch\n${guides.dispatch}` }, 'runtime/work': { roles: WORKER, text: `## work\n${guides.work}` },
@@ -99,13 +100,15 @@ export function policySection(settings: Settings, config: PromptConfig = default
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
  * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
  */
-export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }) {
+export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, variant?: string) {
   // A built-in part names the key its text is overridden by, which for the handoff names the role.
   const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
   const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
     text: config[name] ? `## ${TEAM_HEADINGS[name]}\n${config[name]}` : '' })
+  // A worker role has one part per variant of the work its ticket names (`ops` for the tooling and AI files around the game).
+  const rolePart = role === 'orchestrator' ? 'runtime/orchestrator' : variant && builtInPart(`runtime/worker/${variant}`) ? `runtime/worker/${variant}` : 'runtime/worker'
   return [
-    fixed('runtime/shared'), fixed(`runtime/${role}`),
+    fixed('runtime/shared'), fixed(rolePart),
     ...TEAM_SECTIONS.map(team),
     ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
     ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
@@ -114,8 +117,8 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
   ].filter(part => part.text)
 }
-export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
-  return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
+export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, variant?: string): string {
+  return promptParts(config, role, environment, policy, variant).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
   return name === 'feishu' || name === 'github' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
@@ -138,9 +141,9 @@ export class Prompts {
     private readonly feishu: () => boolean) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
-  /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
-  compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+  /** A role's prompt, and for a worker the variant its ticket's `workspaceRole` names; the main Session's Policy section follows the settings as they are now, at each model request. */
+  compose(config: PromptConfig, role: Role, variables = this.environment(), variant?: string): string {
+    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined, variant)
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
