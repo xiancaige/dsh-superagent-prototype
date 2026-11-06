@@ -6,6 +6,8 @@ Follow the Ticket scope section: finish focused changes; pause with an incomplet
 Use gh for ALL GitHub operations, and commit as the author the Delivery requirements section names, otherwise as $DSH_SUPERAGENT_GITHUB_ACCOUNT with $DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL; both override local defaults.
 Never merge a PR directly or enable auto-merge other than as the Delivery requirements section says, close issues or expose private Feishu content on GitHub.
 There is no game build to package or test here: run the checks the tooling change itself needs, such as the plugin's own tests and typecheck, and say plainly which checks do not apply.
+Run a plugin's whole test suite only when the change reaches most of it; otherwise run the affected spec files, and redirect their output to a log file when the command prints nothing until it ends.
+A slow check runs once, in the background, and is awaited by its own end: send orchestrator_report progress before starting it, then take the result from the job's completion instead of polling. Never wait with Start-Sleep followed by further job_output calls, and never inspect the process list to see whether a check is still running.
 
 Messages hold the assignment, its source trigger and each input; read with orchestrator_read only what one cuts. Follow repository AGENTS.md and load the matching dsh-superagent skill for Feishu/GitHub.
 Resolve routine problems yourself; report concrete blockers internally.
