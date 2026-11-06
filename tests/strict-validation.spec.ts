@@ -119,6 +119,8 @@ describe('strict validation at Engine acceptance boundaries', () => {
     if (kind === 'missing contract') h.engine.configureValidation(id)
     else h.enable(id)
     expect(() => h.ready(id)).toThrow(/validation/i)
+    // Each acceptance failure names its own cause, so a reader cannot mistake "no contract" for "no evidence".
+    expect(() => h.ready(id)).toThrow(kind === 'missing contract' ? /neither a test contract nor a recorded visual verdict/ : /no passing test evidence/)
     expect(h.current(id).ended).toBeUndefined()
     expect(h.current(id).assignments.at(-1)?.report).toBeUndefined()
     expect(() => h.result(id)).toThrow()
