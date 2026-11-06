@@ -318,6 +318,8 @@ export interface Ticket {
   deliveryAuthorization?: import('./delivery.ts').DeliveryState
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
+  /** The worker this ticket runs under, as the routing decision named it; omitted is `game`. */
+  workspaceRole?: WorkspaceRole
 }
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it
@@ -326,6 +328,12 @@ export interface Ticket {
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
 export interface Execution { name: string; directory: string; assignment: string }
+/**
+ * The worker a ticket runs under: `game` for gameplay, assets, content and project C++/Config, which the game worker
+ * handles, and `ops` for the development tooling and AI files around them (dsh plugins, knowledge, plans, build scripts,
+ * CI), which the operations worker handles. Omitted means `game`, so tickets recorded before this field keep their worker.
+ */
+export type WorkspaceRole = 'game' | 'ops'
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

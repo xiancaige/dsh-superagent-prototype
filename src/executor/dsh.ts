@@ -239,9 +239,11 @@ export class DshExecutor implements Executor {
     // Failed input deliveries are recorded on the ticket itself rather than reported through the `delivery` effect health entry (`quiet: true`).
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
   }
-  /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
+  /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text), and the worker the decision named. */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, this.host.machine) }
+    // Only a role other than the default is recorded, so a ticket that names none stays as it was written before the field existed.
+    const role = outcome.workspaceRole && outcome.workspaceRole !== 'game' ? { workspaceRole: outcome.workspaceRole } : {}
+    return { ...ticket, ...role, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, this.host.machine) }
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
@@ -321,7 +323,7 @@ export class DshExecutor implements Executor {
         try {
           // Recreate the worker session if it was externally deleted.
           if (!this.host.context.agents.get(sessionId as SessionId)) {
-            await this.host.sessions.ensure(sessionId, ticket.execution?.directory ?? '', ticket.title, 'worker')
+            await this.host.sessions.ensure(sessionId, ticket.execution?.directory ?? '', ticket.title, 'worker', ticket.workspaceRole)
           }
           // A message to a worker that handed the environment over takes it again first, or is refused naming its holder.
           this.host.engine.ensureEnvironment(ticketId)
@@ -464,7 +466,7 @@ export class DshExecutor implements Executor {
     // naming its holder; it is never launched on an environment another ticket holds.
     this.host.engine.ensureEnvironment(ticket.id)
     const sessionId = workerSessionId(ticket.id)
-    const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')
+    const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker', ticket.workspaceRole)
     if (!current()) return
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
     await this.stopped(ticket.id)
