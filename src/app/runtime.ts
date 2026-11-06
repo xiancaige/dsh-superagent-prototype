@@ -379,7 +379,7 @@ export class Runtime extends Service implements SourceHost {
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
     const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
-    return channel => this.sources.link(channel, links)
+    return (channel, thread) => this.sources.link(channel, links, thread)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)

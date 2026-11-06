@@ -1,8 +1,10 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
+import { threadKey } from '../core/model.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
+import { threadPath } from '../client/route.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 
@@ -97,9 +99,15 @@ export class SourceRegistry implements SourceScope {
     if (!kind) return 'waiting'
     return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
   }
-  link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
-    const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)
-    return link ?? { url: '', label: { zh: channel.source, en: channel.source } }
+  /**
+   * The Channel's link names the page a person answers on: the panel's Thread page for a Source answered in the panel
+   * (`channel.panel`, of the Thread whose address is `thread`), and the Source's own page otherwise. A Source with neither
+   * has the empty link the panel cannot offer.
+   */
+  link(channel: ChannelRef, links: ChannelLinks, thread?: string): ChannelLink {
+    const kind = this.kinds.get(channel.source)?.channel
+    const label = { zh: channel.source, en: channel.source }
+    return kind?.link(channel.address, links) ?? (kind?.panel && thread ? { url: threadPath(thread), label } : { url: '', label })
   }
   find(query: string): { threads: string[]; terms: string[] } {
     const found = [...this.kinds.values()].flatMap(kind => kind.find ? [kind.find(query)] : [])

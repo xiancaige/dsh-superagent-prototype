@@ -3,7 +3,8 @@
 import { act } from 'react'
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { threadPath } from '../src/client/route.ts'
+import { usePanel, mount, mountAt, unmountPanel, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -139,6 +140,32 @@ it('keeps what a person types in the Execution settings, converting it once on s
   expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
 })
 
+it('opens the Thread page its address names, keeps the address of the page on screen, and answers a local question where the panel can', async () => {
+  const key = 'feishu:oc_1:om_root'
+  await mountAt(threadPath(key))
+  expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
+  expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('这个文案好奇怪')
+  // Another page returns the address home: a reload at home opens home rather than the Thread page left behind, and the
+  // Ticket page has no address of its own, so it is remembered instead.
+  await click(zh['tab.execution'])
+  expect(window.location.pathname).toBe('/')
+  await remount()
+  expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
+  await remount()
+  expect(document.querySelector('.dt-status-line .dt-stage')?.textContent).toBe(zh.executingLabel)
+  // A Source answered in the panel links its Thread page there, and a Channel that names no page offers no link.
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
+    channels: [{ source: 'local', url: '/orchestrator/threads/local%3A344e468e-2bf1-47a4-adde-0cb065e1c1ce',
+      label: { zh: '本地任务', en: 'Local task' } }, { source: 'feishu', url: '', label: { zh: '飞书消息', en: 'Feishu message' } }] }
+  at({ page: 'execution', id: 't1' })
+  await unmountPanel()
+  await mount()
+  // The Ticket page has no address of its own; the Channel's link names the Thread page a person answers on.
+  expect(window.location.pathname).toBe('/')
+  expect(all('.dt-banner a').map(link => [link.textContent, link.getAttribute('href')])).toEqual([['去local回答',
+    '/orchestrator/threads/local%3A344e468e-2bf1-47a4-adde-0cb065e1c1ce']])
+})
 it('says why an Input was not delivered on its Ticket\'s page, in either language', async () => {
   const t1 = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'delivery', deliveryError: 'feishu: message recalled' }
@@ -163,7 +190,8 @@ it('tells a Ticket or Thread that does not exist from a dsh-superagent that is n
   // While dsh-superagent restarts, DSH's web server answers every route with an empty 404.
   at({ page: 'execution', id: 't1' })
   server.down = true
-  await remount()
+  await unmountPanel()
+  await mount()
   expect(text()).not.toContain(zh.ticketNotFound)
   expect(text()).toContain(zh.hostNotRunning)
   at({ page: 'trigger', id: 'feishu:oc_1:om_root' })

@@ -57,7 +57,9 @@ export function localKind(host: SourceContext): SourceKind {
           kind: message.kind, ...message.ticketId ? { ticketId: message.ticketId } : {} })
         return 'sent'
       },
-      link: address => ({ url: `/orchestrator/threads/${encodeURIComponent(`local:${address.thread}`)}`, label: { zh: '本地任务', en: 'Local task' } }),
+      // The operator answers in the panel's Thread page, which the Registry links for every kind answered in the panel.
+      link: () => ({ url: '', label: { zh: '本地任务', en: 'Local task' } }),
+      panel: true,
     },
     threadContext: {
       messageId: trigger => String(trigger.meta.messageId),

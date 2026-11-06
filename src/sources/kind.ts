@@ -51,8 +51,10 @@ export interface SourceChannel<C> {
    * @throws when delivery failed but may succeed on a later retry.
    */
   send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
-  /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
+  /** Returns the URL and label for `address`; `url` is empty when the Source is answered in the panel (`panel`) or `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
+  /** Whether a person answers this kind's Threads in the panel, whose Thread page links to them. */
+  panel?: boolean
 }
 /** Normalized message returned by thread context readers; `bot` marks a non-human sender whose message can never authorize work on its own (at most an inferred candidate). */
 export interface ContextMessage {
