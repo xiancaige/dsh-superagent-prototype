@@ -1,4 +1,4 @@
-/** Typed panel routes, route parser, and sessionStorage location history. */
+/** Typed panel routes, route parser, Thread page addresses, and sessionStorage location history. */
 import { THREAD_FILTERS, TICKET_FILTERS, type ThreadFilter, type TicketFilter } from '../app/api.ts'
 import type { SetupPlace } from '../setup.ts'
 import { DECISION_FILTERS, type DecisionFilter } from './api.ts'
@@ -43,6 +43,20 @@ export function parseRoute(value: unknown): Route | undefined {
     case 'settings': return { page, query: { group: pick(SETTINGS_GROUPS, query?.group) ?? 'source',
       ...compact({ source: text('source'), version: text('version') }) } }
     default: return undefined
+  }
+}
+
+/** Root-relative address of one Thread page, which a Channel's in-panel link points at. */
+export const threadPath = (key: string): string => `/orchestrator/threads/${encodeURIComponent(key)}`
+/** The route a Thread page's address names; other addresses carry no route. */
+export function addressRoute(pathname: string): Route | undefined {
+  const match = /^\/orchestrator\/threads\/([^/]+)\/?$/.exec(pathname)
+  if (!match) return undefined
+  try {
+    const id = decodeURIComponent(match[1]!)
+    return id ? { page: 'trigger', id } : undefined
+  } catch {
+    return undefined
   }
 }
 
