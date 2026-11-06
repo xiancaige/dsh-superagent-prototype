@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
+import { OPS_PRESET, ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
@@ -29,7 +29,7 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
   expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-local', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
-    'dsh-superagent-router-preset'])
+    'dsh-superagent-worker-ops-preset', 'dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
@@ -51,6 +51,23 @@ it('defines the worker preset Executor Sessions run under, with a shell that mov
   for (const name of ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode', '@deepseek-ai/dsh-plugin-manager/tools',
     '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-command-goal',
     '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names).not.toContain(name)
+})
+
+it('defines the operations worker preset an ops ticket runs under: the worker tools plus web fetch, and no subagents', async () => {
+  const rows = await patched()
+  const ops = presetOf(rows, OPS_PRESET), worker = presetOf(rows, WORKER_PRESET)
+  expect(ops.order).toBe(92)
+  const plugins = flat(ops.plugins)
+  const named = (preset: Row[], name: string) => preset.filter(row => row.name === name).map(row => row.config)
+  // A shell and job waits as the game worker has them, so a long command never holds back a person's message.
+  for (const name of ['@deepseek-ai/dsh-tool-pwsh', '@deepseek-ai/dsh-tool-jobs', '@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-tool-fs-search',
+    '@deepseek-ai/dsh-skill-filesystem', '@deepseek-ai/dsh-tool-skill', '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-agent-instructions',
+    '@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-compaction-tool-result-pruner']) expect(named(plugins, name), name).toEqual(named(flat(worker.plugins), name))
+  // Operations work looks packages and documentation up, so it may fetch pages the game worker only searches.
+  expect(named(plugins, '@deepseek-ai/dsh-tool-web')).toEqual([expect.objectContaining({ fetch: true })])
+  // A spawned subagent runs under `standard`, not this role, so operations work carries none.
+  expect(named(plugins, '@deepseek-ai/dsh-tool-subagent')).toEqual([])
+  expect(named(plugins, '@deepseek-ai/dsh-tool-subagent-control')).toEqual([])
 })
 
 it('defines the router preset the main Session runs under: the worker\'s 5-second shell and job waits, and only the tools it uses', async () => {
