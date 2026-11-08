@@ -25,6 +25,7 @@ const bot = (ctx: SourceContext): FeishuBot => {
   return resolved
 }
 export async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
+  if (await ctx.command?.(trigger)) return
   // A reply in the Feishu topic of a ticket that started on the local panel is a person's message on that ticket's own Thread,
   // as if typed in the panel; its Channel stays this Feishu message, so the answer goes back to the topic.
   const rootId = typeof trigger.meta.rootId === 'string' ? trigger.meta.rootId : undefined
