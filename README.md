@@ -30,6 +30,18 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
+## Feishu operator commands (TP extension)
+
+Commands run directly in the enabled Superagent Feishu Source, without an LLM call or the old communication plugin. Only listed human operators in a listened chat may use them (DM, or bot mention in a group). Commands never become tickets; ordinary requests keep the existing intake path.
+
+- `/model [page]`: show the host model catalog and role defaults.
+- `/model <provider> <model> [all|main|worker|ticket-id]`: explicitly select a model, default `all`. `main` and `worker` update role defaults and existing managed sessions; a full open ticket ID updates just that ticket's session. `/mode` is an alias. Model IDs may contain `/`; provider and model are separate arguments.
+- Existing productive turns are not cancelled: the next model request uses the selection. A known quota-retry wait is cancelled with its inbox preserved and a deterministic continuation queued. Unrelated sessions and retry policy are not changed. Host `selectModel` also saves the host default, as a manual Web selection does.
+- `/todo` (also `todo`): project TODO index; `/todo <number>`: detail, with checkpoint metadata removed. Requires explicit deployment `sourceRoot`. Replies are shortened to the existing IM limit; full text remains in the planboard.
+- `/h` or `/help`: syntax. No old session-switch commands are enabled.
+
+Selection failures are reported, not treated as success. A failure after defaults/earlier sessions changed may leave partial progress; resend a new command to converge. Receipt and reply IDs deduplicate live/history delivery; replay after a crash is convergent and continuation IDs are stable.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
