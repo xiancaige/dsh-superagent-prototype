@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type TicketEndBy, type TicketOutcome, type Trigger } from '../core/index.ts'
+import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -28,6 +28,7 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
+import { installTicketAnalysis } from './ticket-analysis.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -55,47 +56,6 @@ import { exclusivityPort, RECOVERY_HOLDER_PREFIX } from './editor-recovery-lease
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
-/**
- * What `console/ticket-ended` carries to other plugins: the end of one authorized unit of work, after its completion gate
- * passed. It is a notice, never a decision: a listener may archive, summarize or forget, and none of it can hold the ticket
- * open, change its outcome or grant anything. Only `outcome: 'completed'` reached `assertTicketValidated`.
- */
-export interface TicketEndedNotice {
-  ticketId: string
-  /**
-   * The worker Session that ran the ticket (`worker-<ticketId>`). A listener that means to learn from the end reads the
-   * session through the host's own session query, so the notice carries the reference and not a copy of the history.
-   */
-  sessionId: string
-  /** Who ended it: its Executor, or a person (`stopped` only ends this way). */
-  by: TicketEndBy
-  outcome: TicketOutcome
-  /** Why, when the end carries a reason distinct from its outcome. */
-  reason?: string
-  at: string
-}
-// The one event dsh-superagent publishes outside itself, so a plugin can follow its work without reading its store.
-// Declared on the host's global events, as cordis resolves listeners by that name (`ctx.on('console/ticket-ended', ...)`).
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    'console/ticket-ended': (notice: TicketEndedNotice) => void
-  }
-}
-/**
- * Runs every `console/ticket-ended` listener and reports the ones that failed, without letting one stop the others.
- *
- * cordis `emit` calls listeners in order and stops at the first throw, so a plugin whose listener misbehaves would hide the
- * end of a unit of work from every plugin registered after it. `parallel` settles all of them and throws one aggregate; a
- * listener that meaningfully takes longer than its neighbors still cannot hold the ticket, since nothing awaits this.
- */
-export async function publishTicketEnded(ctx: Context, notice: TicketEndedNotice): Promise<void> {
-  try { await ctx.parallel('console/ticket-ended', notice) }
-  catch (error) {
-    const failures = error instanceof AggregateError ? error.errors : [error]
-    ctx.logger.warn('dsh-superagent: %d console/ticket-ended listener(s) failed for ticket %s: %s',
-      failures.length, notice.ticketId, failures.map(reason => String(reason)).join('; '))
-  }
-}
 const now = (): string => new Date().toISOString()
 /** How long a hard-restart's own fresh heartbeat lock is waited for before giving up. */
 const LOCK_WAIT_MS = 40_000
@@ -272,6 +232,7 @@ export class Runtime extends Service implements SourceHost {
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
+      installTicketAnalysis(ctx, store, effects)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
@@ -338,15 +299,12 @@ export class Runtime extends Service implements SourceHost {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
           }
-          // Publish the end of a unit of work to other plugins, so one can archive or summarize it without reading the
-          // store. This runs inside the engine's transaction, so it only hands the notice to a later macrotask: a listener
-          // that takes minutes must never hold the ticket's end open. The notice is a copy, not the stored ticket, exactly
-          // as an event's data already is.
+          // Persist the direct call in the same transaction as the end. Effects dispatch after commit,
+          // survive restart, and never ask a broadcast listener or an LLM to notice the end.
           if (event.type === 'ticket.ended') {
             const { ticketId, by, outcome, reason } = event.data
-            const notice: TicketEndedNotice = { ticketId, sessionId: workerSessionId(ticketId), by, outcome,
-              ...reason ? { reason } : {}, at: event.at }
-            setImmediate(() => publishTicketEnded(ctx, notice))
+            effects.enqueue('ticketAnalysis', ticketId, { ticketId, sessionId: workerSessionId(ticketId), by, outcome,
+              ...reason ? { reason } : {}, at: event.at })
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.

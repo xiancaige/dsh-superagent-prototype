@@ -470,7 +470,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
-| `tests/ticket-ended-notice.spec.ts` | The `console/ticket-ended` broadcast a finished ticket emits, and that a listener throwing does not stop the listeners after it |
+| `tests/ticket-ended-notice.spec.ts` | Direct evolution service calls through durable ticketAnalysis effects: commit/rollback, restart, busy retries, and final-result recording without automatic rebilling |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
