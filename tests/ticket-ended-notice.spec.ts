@@ -1,91 +1,112 @@
-/**
- * `console/ticket-ended` is the one event dsh-superagent publishes outside itself. These tests hold the facts a listener
- * plugin depends on: the notice is a copy of the end (not the stored ticket), it reaches a listener registered on the
- * host's global events, it is published after the publishing frame returns, and one misbehaving listener neither hides the
- * end from the others nor fails the ticket.
- */
+/** Ticket completion is a durable direct call, not a host broadcast. */
 import { Context } from '@deepseek-ai/cordis'
-import { expect, it, vi } from 'vitest'
-import type { TicketEndedNotice } from '../src/app/runtime.ts'
-import { publishTicketEnded } from '../src/app/runtime.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+import { Store } from '../src/app/store.ts'
+import { Effects } from '../src/app/effects.ts'
+import { HealthBoard } from '../src/infra/health.ts'
+import { installTicketAnalysis, type EvolutionAnalyzer, type TicketAnalysisInput } from '../src/app/ticket-analysis.ts'
+import { KV } from '../src/kv.ts'
+import { startRuntime, feishu } from './fixtures/host.ts'
+import { ticketDetail } from '../src/app/views/tickets.ts'
 
-/** A Context with a logger the tests can inspect, as the Runtime has. */
-function fixture(): { ctx: Context; warn: ReturnType<typeof vi.fn> } {
+const dirs: string[] = []
+afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+const input: TicketAnalysisInput = { ticketId: 't1', sessionId: 'worker-t1', by: 'executor', outcome: 'completed', at: '2026-11-08T00:00:00Z' }
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'direct-ticket-analysis-')); dirs.push(dir)
+  const store = new Store(join(dir, 'state.sqlite'))
   const ctx = new Context()
   const warn = vi.fn()
-  Object.assign(ctx, { logger: { warn, info: vi.fn(), debug: vi.fn(), error: vi.fn() } })
-  return { ctx, warn }
+  Object.assign(ctx, { logger: { warn } })
+  let now = 1000
+  const effects = new Effects(store, new HealthBoard(), () => now)
+  installTicketAnalysis(ctx, store, effects)
+  const service = (analyzeTicket: EvolutionAnalyzer['analyzeTicket']) => ctx.provide('evolveReflect', { analyzeTicket })
+  return { store, ctx, effects, service, warn, advance: () => { now += 60_000 } }
 }
 
-it('delivers a completed ticket notice to a listener registered on the host events', async () => {
-  const { ctx } = fixture()
-  const heard = vi.fn()
-  ctx.on('console/ticket-ended', heard)
-  const notice: TicketEndedNotice = { ticketId: 't1', sessionId: 'worker-t1', by: 'executor', outcome: 'completed', at: '2026-11-05T00:00:00.000Z' }
-  await publishTicketEnded(ctx, notice)
-  expect(heard).toHaveBeenCalledTimes(1)
-  expect(heard).toHaveBeenCalledWith(notice)
+it('the real Runtime routes a committed worker completion to evolution without a broadcast', async () => {
+  const h = await startRuntime()
+  const analyze = vi.fn(async () => ({ ok: true, status: 'completed', jobId: 'runtime-job' }))
+  h.ctx.provide('evolveReflect', { analyzeTicket: analyze })
+  const broadcast = vi.spyOn(h.ctx, 'parallel')
+  try {
+    const { ticket, sessionId } = await h.acceptedTicket(feishu('1', 'Fix regression'))
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
+    await h.runtime.idle()
+    expect(h.runtime.store.tickets.get(ticket.id)?.ended?.outcome).toBe('completed')
+    expect(analyze).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ticketId: ticket.id, sessionId, outcome: 'completed' }))
+    expect(h.runtime.store.get(KV.runtime.ticketAnalysis(ticket.id))?.result.jobId).toBe('runtime-job')
+    expect(ticketDetail({ store: h.runtime.store, sources: h.runtime.sources, links: h.runtime.links() }, ticket.id)?.evolutionAnalysis?.result.jobId).toBe('runtime-job')
+    expect(broadcast.mock.calls.some(call => String(call[0]) === 'console/ticket-ended')).toBe(false)
+  } finally { await h.stop() }
 })
 
-it('carries who ended it and why, so a listener can decide without reading the store', async () => {
-  const { ctx } = fixture()
-  const heard = vi.fn()
-  ctx.on('console/ticket-ended', heard)
-  const notice: TicketEndedNotice = { ticketId: 't2', sessionId: 'worker-t2', by: 'human', outcome: 'stopped', reason: 'stopped by a person', at: '2026-11-05T01:00:00.000Z' }
-  await publishTicketEnded(ctx, notice)
-  expect(heard).toHaveBeenCalledWith(notice)
+it('calls one named service after commit and stores the actual result', async () => {
+  const f = fixture(), analyze = vi.fn(async () => ({ ok: true, jobId: 'j1', status: 'completed' }))
+  f.service(analyze)
+  try {
+    f.effects.start()
+    f.store.atomic(() => { f.effects.enqueue('ticketAnalysis', input.ticketId, input); expect(analyze).not.toHaveBeenCalled() })
+    await f.effects.idle()
+    expect(analyze).toHaveBeenCalledExactlyOnceWith(input)
+    expect(f.store.get(KV.runtime.ticketAnalysis('t1'))?.result).toEqual({ ok: true, jobId: 'j1', status: 'completed' })
+    expect(f.effects.pending('ticketAnalysis')).toBe(false)
+  } finally { await f.effects.drain(); f.store.close() }
 })
 
-it('names the worker Session that ran the ticket, so a listener reads the run through the host session query', async () => {
-  const { ctx } = fixture()
-  const heard = vi.fn()
-  ctx.on('console/ticket-ended', heard)
-  // The reference is the Executor's own worker Session id, not a copy of its history: the listener decides what to read.
-  const notice: TicketEndedNotice = { ticketId: 't7', sessionId: 'worker-t7', by: 'executor', outcome: 'completed', at: '2026-11-05T06:00:00.000Z' }
-  await publishTicketEnded(ctx, notice)
-  expect(heard).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'worker-t7' }))
-  expect(notice.sessionId).toBe(`worker-${notice.ticketId}`)
+it('a rolled-back ticket end never calls evolution', async () => {
+  const f = fixture(), analyze = vi.fn(async () => ({ ok: true }))
+  f.service(analyze)
+  try {
+    f.effects.start()
+    expect(() => f.store.atomic(() => { f.effects.enqueue('ticketAnalysis', 't1', input); throw new Error('rollback') })).toThrow('rollback')
+    await f.effects.idle()
+    expect(analyze).not.toHaveBeenCalled()
+    expect(f.effects.pending('ticketAnalysis')).toBe(false)
+  } finally { await f.effects.drain(); f.store.close() }
 })
 
-it('reaches listeners registered after one that throws', async () => {
-  const { ctx, warn } = fixture()
-  const after = vi.fn()
-  ctx.on('console/ticket-ended', () => { throw new Error('listener broke') })
-  ctx.on('console/ticket-ended', after)
-  await publishTicketEnded(ctx, { ticketId: 't3', sessionId: 'worker-t3', by: 'executor', outcome: 'completed', at: '2026-11-05T02:00:00.000Z' })
-  // The failure is reported, and the later listener still heard the end.
-  expect(after).toHaveBeenCalledTimes(1)
-  expect(warn).toHaveBeenCalledTimes(1)
-  expect(String(warn.mock.calls[0]?.[0])).toContain('console/ticket-ended listener(s) failed')
+it('survives restart and retries service unavailability and busy without dropping the ticket', async () => {
+  const f = fixture()
+  f.store.atomic(() => f.effects.enqueue('ticketAnalysis', 't1', input))
+  await f.effects.drain()
+  const next = new Effects(f.store, new HealthBoard())
+  installTicketAnalysis(f.ctx, f.store, next)
+  try {
+    next.start(); await next.idle()
+    expect(next.pending('ticketAnalysis')).toBe(true)
+    const analyze = vi.fn().mockResolvedValueOnce({ ok: false, reason: 'busy' }).mockResolvedValue({ ok: true, status: 'completed' })
+    f.service(analyze)
+    f.store.db.prepare('UPDATE effect SET due=0').run()
+    await next.idle()
+    expect(next.pending('ticketAnalysis')).toBe(true)
+    expect(f.store.get(KV.runtime.ticketAnalysis('t1'))).toBeUndefined()
+    f.store.db.prepare('UPDATE effect SET due=0').run()
+    await next.idle()
+    expect(analyze).toHaveBeenCalledTimes(2)
+    expect(next.pending('ticketAnalysis')).toBe(false)
+  } finally { await next.drain(); f.store.close() }
 })
 
-it('reports nothing when every listener succeeds', async () => {
-  const { ctx, warn } = fixture()
-  ctx.on('console/ticket-ended', vi.fn())
-  ctx.on('console/ticket-ended', vi.fn())
-  await publishTicketEnded(ctx, { ticketId: 't4', sessionId: 'worker-t4', by: 'executor', outcome: 'completed', at: '2026-11-05T03:00:00.000Z' })
-  expect(warn).not.toHaveBeenCalled()
+it('waits for analysis completion and records failure without repeated LLM billing', async () => {
+  const f = fixture()
+  let finish!: (result: { ok: boolean; reason: string }) => void
+  const analyze = vi.fn(() => new Promise<{ ok: boolean; reason: string }>(resolve => { finish = resolve }))
+  f.service(analyze)
+  try {
+    f.effects.start(); f.effects.enqueue('ticketAnalysis', 't1', input)
+    await Promise.resolve()
+    expect(f.effects.pending('ticketAnalysis')).toBe(true)
+    expect(f.store.get(KV.runtime.ticketAnalysis('t1'))).toBeUndefined()
+    finish({ ok: false, reason: 'model-failed' })
+    await f.effects.idle()
+    expect(f.store.get(KV.runtime.ticketAnalysis('t1'))?.result.reason).toBe('model-failed')
+    f.advance(); await f.effects.idle()
+    expect(analyze).toHaveBeenCalledTimes(1)
+    expect(f.warn).toHaveBeenCalledTimes(1)
+  } finally { await f.effects.drain(); f.store.close() }
 })
-
-it('completes with no listener at all, so an unwatched deployment still ends tickets', async () => {
-  const { ctx, warn } = fixture()
-  await expect(publishTicketEnded(ctx, { ticketId: 't5', sessionId: 'worker-t5', by: 'executor', outcome: 'completed', at: '2026-11-05T04:00:00.000Z' })).resolves.toBeUndefined()
-  expect(warn).not.toHaveBeenCalled()
-})
-
-it('publishes on a later macrotask, so a slow listener never holds the ticket end open', async () => {
-  // Mirrors the Runtime's call site: it schedules the publish and returns, it never awaits it inside the transaction.
-  const { ctx } = fixture()
-  const heard = vi.fn()
-  ctx.on('console/ticket-ended', heard)
-  const notice: TicketEndedNotice = { ticketId: 't6', sessionId: 'worker-t6', by: 'executor', outcome: 'completed', at: '2026-11-05T05:00:00.000Z' }
-  let returned = false
-  setImmediate(() => { void publishTicketEnded(ctx, notice).then(() => { returned = true }) })
-  // The scheduling frame has returned (the emitter is free), while the notice is not yet delivered.
-  expect(hearCheck(heard)).toBe(false)
-  await new Promise(resolve => setImmediate(resolve))
-  expect(returned).toBe(true)
-  expect(heard).toHaveBeenCalledTimes(1)
-})
-
-const hearCheck = (heard: ReturnType<typeof vi.fn>): boolean => heard.mock.calls.length > 0

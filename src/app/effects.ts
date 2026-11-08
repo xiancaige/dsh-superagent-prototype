@@ -9,6 +9,8 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
+  /** Direct evolution analysis after a committed ticket end; the key is the ticket ID. */
+  ticketAnalysis: import('./ticket-analysis.ts').TicketAnalysisInput
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string }
   /** Launch a pending Assignment; the key is the Assignment ID. */
