@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
+import { modelCardAction } from './feishu-model-card.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { feishuEnvironment } from '../infra/feishu-environment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
@@ -17,7 +18,11 @@ import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './po
 import type { FeishuConfig } from './feishu.ts'
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
-  Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
+  Promise.allSettled([
+    watch, backfillLoop, chatNamesLoop,
+    // The CLI allows one EventKey per consumer, so interactive clicks need their own; it exists only where the host handles them.
+    ...ctx.cardAction ? [(ctx: SourceContext, signal: AbortSignal) => watch(ctx, signal, 'card.action.trigger')] : [],
+  ].map(loop => loop(ctx, signal)))
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
 const bot = (ctx: SourceContext): FeishuBot => {
   const resolved = ctx.deployment.feishu
@@ -47,7 +52,7 @@ function available(ctx: SourceContext): boolean {
 }
 
 /** Runs the live event consumer only while the Source is enabled; disabling it stops the consumer within five seconds. */
-async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+async function watch(ctx: SourceContext, signal: AbortSignal, eventKey = 'im.message.receive_v1'): Promise<void> {
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the bot; until then nothing runs.
   if (!available(ctx)) return
@@ -63,7 +68,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     const stop = () => running.abort()
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()
-    try { await consume(ctx, running.signal) }
+    try { await consume(ctx, running.signal, eventKey) }
     catch (error) { if (!running.signal.aborted) ctx.report('feishu', { state: 'error', detail: String(error) }) }
     finally { clearInterval(check); signal.removeEventListener('abort', stop) }
     if (running.signal.aborted) continue
@@ -74,8 +79,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
 /** Wait before restarting the event consumer: 1s after a run that stayed up for a minute, otherwise exponential backoff up to 60s. */
 export const consumerRetry = (previous: number | undefined, ranMs: number): number =>
   previous === undefined || ranMs >= 60_000 ? 1000 : Math.min(previous * 2, 60_000)
-async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
-  const child = spawn(bot(ctx).cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'],
+async function consume(ctx: SourceContext, signal: AbortSignal, eventKey: string): Promise<void> {
+  const child = spawn(bot(ctx).cli, ['event', 'consume', eventKey, '--as', 'bot'],
     { stdio: ['pipe', 'pipe', 'pipe'], env: feishuEnvironment(bot(ctx).configDir, process.env) })
   const stdout = createInterface({ input: child.stdout }); const stderr = createInterface({ input: child.stderr })
   let chain = Promise.resolve(); let diagnostic = ''; let ready = false
@@ -92,8 +97,16 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   stdout.on('line', (line: string) => {
     chain = chain.then(async () => {
       if (line.length > 1_048_576) throw new Error('Feishu event exceeds 1 MiB')
-      const trigger = feishuTrigger(JSON.parse(line), bot(ctx).botId, bot(ctx).appId)
-      // Events already read when the Source is disabled are dropped; the consumer stops shortly after.
+      const raw = JSON.parse(line) as Record<string, unknown>
+      const event = raw.event && typeof raw.event === 'object' ? raw.event as Record<string, unknown> : raw
+      // Card callbacks use a different event payload than message.receive_v1; do not parse them as messages.
+      if (event.type === 'card.action.trigger') {
+        const action = modelCardAction(event)
+        if (enabled(ctx) && action) await ctx.cardAction?.(action)
+        return
+      }
+      const trigger = feishuTrigger(raw, bot(ctx).botId, bot(ctx).appId)
+      // Events already read when the Source is disabled; the consumer stops shortly after.
       if (!trigger || !enabled(ctx)) return
       const chats = ctx.state.get(KV.feishu.chats) ?? {}
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true

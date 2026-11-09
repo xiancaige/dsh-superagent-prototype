@@ -42,6 +42,8 @@ export interface SourceContext {
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   /** Deterministic operator commands, handled before ordinary message intake. */
   command?(trigger: Trigger): Promise<boolean>
+  /** Authenticated interactive actions bypass ordinary intake. */
+  cardAction?(input: unknown): Promise<boolean>
   atomic<T>(work: () => T): T
   /** Source-scoped KV records (such as read cursors); setting `undefined` removes an entry. */
   state: { get<V>(key: Key<V>): V | undefined; set<V>(key: Key<V>, value: V | undefined): void; keys<V>(family: Family<V, never>): Key<V>[] }

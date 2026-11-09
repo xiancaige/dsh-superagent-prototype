@@ -17,6 +17,12 @@ const gone = (error: unknown): boolean => error instanceof CliError && error.cod
   || /withdrawn/i.test(error.message) || (Math.floor(error.code / 100) === 2300 && /not found/i.test(error.message)))
 /** Replies in the topic of the target message; Feishu keeps at most one reply per idempotency key (the outgoing message's `message.id`). */
 export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
+  if (message.channel.address.delivery === 'chat') {
+    const chatId = message.channel.address.chatId
+    if (!chatId) throw new Error('Missing Feishu chat target')
+    await host.commands.lark(['im', '+messages-send', '--chat-id', chatId, '--markdown', checkedImText(message.text), '--idempotency-key', message.id])
+    return 'sent'
+  }
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)

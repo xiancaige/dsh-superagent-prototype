@@ -2,8 +2,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FeishuCommands, type FeishuCommandsHost } from '../src/app/feishu-commands.ts'
+import { buildModelCard, FeishuCommands, type FeishuCommandsHost } from '../src/app/feishu-commands.ts'
 import { receive } from '../src/sources/feishu-loops.ts'
+import { modelCardAction } from '../src/sources/feishu-model-card.ts'
+import { sendFeishu } from '../src/sources/feishu-channel.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { feishuTrigger } from '../src/sources/feishu-trigger.ts'
 import type { SourceContext } from '../src/sources/host.ts'
@@ -31,6 +33,21 @@ function fixture() {
     sender_type: 'user', content: text, create_time: '1794140000000' }, 'ou_bot', 'cli_bot')!
   return { host, trigger, replies, save, cancel, selectModel, resolveCallConfig, prompt, values }
 }
+it('renders an interactive JSON 2.0 model-selection card with provider/model callback values', () => {
+  const card = buildModelCard({ groups: [{ id: 'provider', name: 'Provider', models: [{ id: 'model', name: 'Model' }] }], default: { provider: 'provider', model: 'model' }, routableProviders: [], failures: [] }, { provider: 'provider', model: 'model' }) as { schema: string; body: { elements: { tag: string; type?: string; text?: { content: string }; behaviors?: { value: unknown }[] }[] } }
+  expect(card.schema).toBe('2.0')
+  const button = card.body.elements.find(element => element.tag === 'button')!
+  expect(button.type).toBe('primary')
+  expect(button.text?.content).toContain('provider / model')
+  expect(button.behaviors?.[0]?.value).toEqual({ cmd: 'model', provider: 'provider', model: 'model' })
+})
+it('uses the legacy callback shape and preserves owner checks before model selection', async () => {
+  const { host, trigger, selectModel, save } = fixture()
+  const command = new FeishuCommands(host)
+  await command.receive(trigger('/model provider model'))
+  expect(save).toHaveBeenCalledTimes(2)
+  expect(selectModel).toHaveBeenCalledWith({ sessionId: 'master', provider: 'provider', model: 'model' })
+})
 it('routes ordinary requests unchanged and consumes commands before mirrored-thread rewriting', async () => {
   const { host, trigger } = fixture(), commands = new FeishuCommands(host)
   expect(await commands.receive(trigger('实现新功能'))).toBe(false)
@@ -38,6 +55,75 @@ it('routes ordinary requests unchanged and consumes commands before mirrored-thr
   await receive(context, trigger('/model'))
   expect(context.receive).not.toHaveBeenCalled()
   expect(context.state.get).not.toHaveBeenCalled()
+})
+it('sends /model cards directly in the triggering chat', async () => {
+  const { host, trigger, replies } = fixture(), sendModelCard = vi.fn(async () => {})
+  host.sendModelCard = sendModelCard
+  await new FeishuCommands(host).receive(trigger('/model'))
+  expect(sendModelCard).toHaveBeenCalledOnce()
+  expect(sendModelCard).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ chatId: 'oc_chat' }) }), expect.any(Object))
+  expect(replies).toHaveLength(0)
+})
+it('normalizes real CLI clicks, survives restart, deduplicates clicks and checks operator/chat/catalog/scope', async () => {
+  const { host, trigger, save, selectModel, replies } = fixture()
+  let card: any
+  host.sendModelCard = async (_trigger, value) => { card = value }
+  const commands = new FeishuCommands(host)
+  await commands.receive(trigger('/model'))
+  await commands.receive(trigger('/model'))
+  const value = card.body.elements.find((element: any) => element.tag === 'button').behaviors[0].value
+  expect(value.request).toEqual(expect.any(String))
+  const event = { type: 'card.action.trigger', operator_id: 'ou_operator', chat_id: 'oc_chat', token: 'click1', action_value: JSON.stringify(value) }
+  const resumed = new FeishuCommands(host)
+  expect(await resumed.cardAction(modelCardAction({ ...event, operator_id: 'ou_stranger' }))).toBe(false)
+  expect(await resumed.cardAction(modelCardAction({ ...event, chat_id: 'oc_else' }))).toBe(false)
+  expect(await resumed.cardAction(modelCardAction({ ...event, action_value: JSON.stringify({ ...value, model: 'missing' }) }))).toBe(false)
+  expect(await resumed.cardAction(modelCardAction({ ...event, action_value: '{' }))).toBe(false)
+  expect(save).not.toHaveBeenCalled()
+  expect(await resumed.cardAction(modelCardAction(event))).toBe(true)
+  expect(await resumed.cardAction(modelCardAction(event))).toBe(true)
+  expect(save).toHaveBeenCalledTimes(2)
+  expect(selectModel).toHaveBeenCalledTimes(2)
+  expect(replies).toHaveLength(1)
+  expect((replies[0] as OutboundMessage).channel.address.delivery).toBe('chat')
+  host.sources.scope = () => ({ listened: false, reason: 'off' })
+  expect(await resumed.cardAction(modelCardAction({ ...event, token: 'click2' }))).toBe(false)
+})
+it('reports a rejected selection into the chat and keeps the card usable', async () => {
+  const { host, trigger, replies, resolveCallConfig } = fixture()
+  let card: any
+  host.sendModelCard = async (_t, value) => { card = value }
+  const commands = new FeishuCommands(host)
+  await commands.receive(trigger('/model'))
+  const value = card.body.elements.find((e: any) => e.tag === 'button').behaviors[0].value
+  const click = (token: string) => modelCardAction({ type: 'card.action.trigger', operator_id: 'ou_operator', chat_id: 'oc_chat', token, action_value: JSON.stringify(value) })
+  resolveCallConfig.mockRejectedValueOnce(new Error('unavailable'))
+  expect(await commands.cardAction(click('bad'))).toBe(true)
+  expect(replies.at(-1)!.text).toContain('命令未完成')
+  expect(await commands.cardAction(click('good'))).toBe(true)
+  expect(replies.at(-1)!.text).toContain('已切换')
+})
+it('does not start a card consumer unless the host handles card actions', async () => {
+  const { runFeishu } = await import('../src/sources/feishu-loops.ts')
+  const ready = Promise.resolve()
+  const reports: number[] = []
+  for (const cardAction of [undefined, async () => true]) {
+    const ctx = { ready, configured: () => false, report: vi.fn(), problem: undefined, deployment: {}, config: () => undefined, state: { get: vi.fn(), set: vi.fn() }, ...cardAction ? { cardAction } : {} } as unknown as SourceContext
+    const controller = new AbortController(); controller.abort()
+    await runFeishu(ctx, controller.signal)
+    reports.push((ctx.report as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'feishu').length)
+  }
+  // Without a handler no extra consumer exists; with one, exactly one more consumer loop starts.
+  expect(reports[1]! - reports[0]!).toBe(1)
+})
+it('sends failures and selection confirmations to the chat, not a new topic', async () => {
+  const { host, trigger, replies } = fixture()
+  host.sendModelCard = async () => { throw new Error('rejected') }
+  await new FeishuCommands(host).receive(trigger('/model'))
+  const lark = vi.fn(async (_args: string[]) => ({}))
+  await sendFeishu({ commands: { lark } } as never, replies[0] as OutboundMessage)
+  expect(lark).toHaveBeenCalledWith(expect.arrayContaining(['+messages-send', '--chat-id', 'oc_chat']))
+  expect(lark.mock.calls[0]?.[0]).not.toContain('--reply-in-thread')
 })
 it('requires a listed human, addressed message, and listened scope even on subscribed threads', async () => {
   const { host, trigger, selectModel, replies } = fixture(), commands = new FeishuCommands(host), good = trigger('/model p m')
