@@ -122,6 +122,61 @@ export function ExecutionSettings() {
       </Fields>
       <SaveBar {...draft} onDiscard={draft.discard} />
     </form>
+    <WorkspaceSettings />
     <ConfigHistory blocks={['executor', 'pause']} />
+  </div>
+}
+/**
+ * Workspace settings: where the state database and every new Ticket's directory live. Each field is a
+ * constructor-time choice, so saving one restarts dsh-superagent; the block shows the workspace the plugin
+ * is running with, and marks the save as pending until that restart lands.
+ */
+export function WorkspaceSettings() {
+  const { t } = usePanel()
+  const { blocks, workspace: mounted } = useSettings().settings
+  const saved = blocks.workspace.value
+  const draft = useBlockDraft('workspace', saved, blocks.workspace.revision, value => ({ ...value,
+    workspaceMode: value.workspaceMode ?? null, executionMode: value.executionMode ?? null }))
+  const value = draft.value
+  const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
+  const source = value.workspaceMode === 'source'
+  return <div className="dt-form">
+    <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
+      <Fields disabled={draft.busy}>
+        <div className="dt-form dt-block">
+          <h2 className="dt-block-title">{t('workspaceTitle')}<InfoTip text={t('workspaceIntro')} /></h2>
+          {mounted.pending && <Hint>{t('workspacePending')}</Hint>}
+          <Field label={t('workspaceStateDir')} hint={t('workspaceStateDirHint')} note={mounted.mounted.stateDir
+            ? t('workspaceMounted', { value: mounted.mounted.stateDir }) : undefined}>
+            <Input className="dt-mono" value={value.stateDir} placeholder={t('workspaceInherit')} spellCheck={false}
+              onChange={event => edit({ stateDir: event.target.value })} />
+          </Field>
+          <Field label={t('workspaceMode')} hint={t('workspaceModeHint')} note={t('workspaceMounted', { value: mounted.mounted.workspaceMode })}>
+            <select className="dt-input" value={value.workspaceMode ?? ''}
+              onChange={event => edit({ workspaceMode: event.target.value === '' ? null : event.target.value as 'isolated' | 'source' })}>
+              <option value="">{t('workspaceInherit')}</option>
+              <option value="isolated">{t('workspaceModeIsolated')}</option>
+              <option value="source">{t('workspaceModeSource')}</option>
+            </select>
+          </Field>
+          <Field label={t('workspaceSourceRoot')} hint={source ? t('workspaceSourceRootRequired') : t('workspaceSourceRootHint')}
+            note={mounted.mounted.sourceRoot ? t('workspaceMounted', { value: mounted.mounted.sourceRoot }) : undefined}>
+            <Input className="dt-mono" value={value.sourceRoot} placeholder={t('workspaceInherit')} spellCheck={false}
+              onChange={event => edit({ sourceRoot: event.target.value })} />
+          </Field>
+          <Field label={t('workspaceExecutionMode')} hint={t('workspaceExecutionModeHint')}
+            note={t('workspaceMounted', { value: mounted.mounted.executionMode })}>
+            <select className="dt-input" value={value.executionMode ?? ''}
+              onChange={event => edit({ executionMode: event.target.value === '' ? null : event.target.value as 'github' | 'local' })}>
+              <option value="">{t('workspaceInherit')}</option>
+              <option value="local">{t('workspaceExecutionLocal')}</option>
+              <option value="github">{t('workspaceExecutionGithub')}</option>
+            </select>
+          </Field>
+        </div>
+      </Fields>
+      <SaveBar {...draft} onDiscard={draft.discard} />
+    </form>
+    <ConfigHistory blocks={['workspace']} />
   </div>
 }

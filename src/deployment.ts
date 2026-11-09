@@ -75,12 +75,66 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { executionMode, stateDir, workspaceMode, sourceRoot, environment, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  if (workspaceMode === 'source') {
-    if (executionMode !== 'local' || !sourceRoot) throw new Error('source workspace requires executionMode=local and sourceRoot')
-    if (!statSync(sourceRoot).isDirectory()) throw new Error('sourceRoot must be an existing directory')
-  } else if (sourceRoot) throw new Error('sourceRoot requires workspaceMode=source')
-  return { executionMode, stateDir, workspaceMode, ...sourceRoot ? { sourceRoot } : {}, ...environment ? { environment } : {}, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  verifyWorkspace({ executionMode, stateDir, workspaceMode, sourceRoot })
+  return { executionMode, stateDir, workspaceMode, ...sourceRoot ? { sourceRoot } : {}, ...environment ? { environment } : {},
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
+
+/** The constructor-time workspace fields a panel override may replace; every other field still comes from the configuration. */
+export interface WorkspaceSelection {
+  executionMode?: 'github' | 'local'
+  stateDir?: string
+  workspaceMode?: 'isolated' | 'source'
+  sourceRoot?: string
+}
+
+/**
+ * Validate one workspace selection with the same rules `machineOf` applies at startup, so the panel cannot
+ * save a value that would make the next mount throw. An empty or absent field means "inherit", and is not checked.
+ */
+export function verifyWorkspace(selection: WorkspaceSelection): void {
+  const { executionMode, workspaceMode, sourceRoot } = selection
+  // `stateDir` is not checked for existence: the Runtime creates it (`mkdirSync`) before locking, and the schema
+  // already refuses a relative path.
+  if (workspaceMode === 'source') {
+    if (executionMode !== undefined && executionMode !== 'local') throw new Error('source workspace requires executionMode=local and sourceRoot')
+    if (!sourceRoot) throw new Error('source workspace requires executionMode=local and sourceRoot')
+    if (!statSync(sourceRoot, { throwIfNoEntry: false })?.isDirectory()) throw new Error('sourceRoot must be an existing directory')
+  } else if (workspaceMode === 'isolated' && sourceRoot) throw new Error('sourceRoot requires workspaceMode=source')
+}
+
+/**
+ * Resolve the workspace a mount should use: a non-empty panel value wins over the configuration, and the
+ * merged result goes through `verifyWorkspace` exactly once. Callers pass the stored settings, so a panel
+ * edit takes effect on the next mount (saving one restarts dsh-superagent).
+ */
+export function resolveWorkspace(config: DeploymentConfig, override?: Partial<WorkspaceSelection>): WorkspaceSelection {
+  const pick = <K extends keyof WorkspaceSelection>(field: K): WorkspaceSelection[K] => {
+    const saved = override?.[field]
+    return (saved === undefined || saved === null || saved === '') ? config[field] : saved
+  }
+  const selection: WorkspaceSelection = { executionMode: pick('executionMode'), stateDir: pick('stateDir'), workspaceMode: pick('workspaceMode'), sourceRoot: pick('sourceRoot') }
+  verifyWorkspace(selection)
+  return selection
+}
+
+/**
+ * Rebuild the configuration a `Machine` was derived from, for callers (tests, embedding code) that already
+ * validated a machine instead of restating the whole plugin configuration to mount it.
+ */
+export function configOf(machine: Machine): DeploymentConfig {
+  return {
+    executionMode: machine.executionMode === 'local' ? 'local' : 'github',
+    stateDir: machine.stateDir,
+    workspaceMode: machine.workspaceMode === 'source' ? 'source' : 'isolated',
+    ...machine.sourceRoot ? { sourceRoot: machine.sourceRoot } : {},
+    ...machine.environment ? { environment: machine.environment } : {},
+    promptMaxChars: machine.promptMaxChars,
+    admissionContextMaxPages: machine.admissionContextMaxPages,
+    admissionContextTimeoutMs: machine.admissionContextTimeoutMs,
+  } as DeploymentConfig
+}
+
 
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),

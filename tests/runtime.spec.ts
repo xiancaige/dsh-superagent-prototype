@@ -1097,8 +1097,8 @@ it('runs the prepare command once for a new ticket, under the execution root wit
 })
 
 it('uses the source root as actual worker cwd and never runs configured prepare, including retry', async () => {
-  runtime.machine.workspaceMode = 'source'
-  runtime.machine.sourceRoot = directory
+  runtime.mounted.workspaceMode = 'source'
+  runtime.mounted.sourceRoot = directory
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 99', directory: join(directory, 'ignored') } })
   subprocess.spawn.mockClear()
   const { ticket, sessionId } = await acceptedTicket()
@@ -1114,8 +1114,8 @@ it('uses the source root as actual worker cwd and never runs configured prepare,
 })
 
 it('fails closed for a missing source root without preparing or creating it', async () => {
-  runtime.machine.workspaceMode = 'source'
-  runtime.machine.sourceRoot = join(directory, 'missing-source')
+  runtime.mounted.workspaceMode = 'source'
+  runtime.mounted.sourceRoot = join(directory, 'missing-source')
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 99' } })
   subprocess.spawn.mockClear()
   const { ticket } = await acceptedTicket()
@@ -1127,8 +1127,8 @@ it('fails closed for a missing source root without preparing or creating it', as
 it('does not implicitly rebind a persisted isolated ticket when source mode is enabled', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
-  runtime.machine.workspaceMode = 'source'
-  runtime.machine.sourceRoot = directory
+  runtime.mounted.workspaceMode = 'source'
+  runtime.mounted.sourceRoot = directory
   subprocess.spawn.mockClear()
   runtime.engine.retryTicket(ticket.id)
   await runtime.idle()
@@ -1356,7 +1356,7 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
   runtime.store.saveSettings({ ...stored, sources: { ...stored.sources, slack: { enabled: false, config: {} } } })
   expect(await request('PUT', 'settings/source:slack', { value: { enabled: true, config: {} }, revision: 0 }))
     .toMatchObject({ status: 400, body: { code: 'sourceNotInstalled', values: { source: 'slack' } } })
-  const huge = { ...runtime.prompts.current().config, delivery: 'x'.repeat(runtime.machine.promptMaxChars.get()) }
+  const huge = { ...runtime.prompts.current().config, delivery: 'x'.repeat(runtime.mounted.promptMaxChars.get()) }
   expect(await request('POST', 'prompts/preview', huge)).toMatchObject({ status: 400, body: { code: 'promptTooLong' } })
   expect(await request('PUT', 'prompts', { config: huge, baseRevision: runtime.prompts.current().revision })).toMatchObject({ status: 400, body: { code: 'promptTooLong' } })
   // An override of a part this version does not have is refused, not missing.
