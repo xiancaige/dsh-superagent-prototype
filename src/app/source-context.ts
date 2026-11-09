@@ -26,6 +26,7 @@ export interface SourceContextDeps {
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   command?(trigger: Trigger): Promise<boolean>
   cardAction?(input: unknown): Promise<boolean>
+  menuAction?(input: { key: string; operator: string; id: string }): Promise<boolean>
 }
 
 /**
@@ -49,6 +50,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     command: trigger => deps.command?.(trigger) ?? Promise.resolve(false),
     // Absent when the host has no interactive handler, so the Feishu Source starts no card consumer.
     ...deps.cardAction ? { cardAction: (input: unknown) => deps.cardAction!(input) } : {},
+    ...deps.menuAction ? { menuAction: (input: { key: string; operator: string; id: string }) => deps.menuAction!(input) } : {},
     atomic: work => store.atomic(work),
     state: {
       get: name => store.get(name),

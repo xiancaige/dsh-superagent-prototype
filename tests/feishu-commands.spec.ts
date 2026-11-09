@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildModelCard, FeishuCommands, type FeishuCommandsHost } from '../src/app/feishu-commands.ts'
 import { receive } from '../src/sources/feishu-loops.ts'
-import { modelCardAction } from '../src/sources/feishu-model-card.ts'
+import { modelCardAction, modelMenuAction, sendModelCard as sendCard } from '../src/sources/feishu-model-card.ts'
 import { sendFeishu } from '../src/sources/feishu-channel.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { feishuTrigger } from '../src/sources/feishu-trigger.ts'
@@ -61,7 +61,7 @@ it('sends /model cards directly in the triggering chat', async () => {
   host.sendModelCard = sendModelCard
   await new FeishuCommands(host).receive(trigger('/model'))
   expect(sendModelCard).toHaveBeenCalledOnce()
-  expect(sendModelCard).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ chatId: 'oc_chat' }) }), expect.any(Object))
+  expect(sendModelCard).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_chat' }), expect.any(Object))
   expect(replies).toHaveLength(0)
 })
 it('normalizes real CLI clicks, survives restart, deduplicates clicks and checks operator/chat/catalog/scope', async () => {
@@ -88,6 +88,56 @@ it('normalizes real CLI clicks, survives restart, deduplicates clicks and checks
   expect((replies[0] as OutboundMessage).channel.address.delivery).toBe('chat')
   host.sources.scope = () => ({ listened: false, reason: 'off' })
   expect(await resumed.cardAction(modelCardAction({ ...event, token: 'click2' }))).toBe(false)
+})
+it('normalizes the real CLI bot-menu event, which names the operator but no chat', () => {
+  const event = { type: 'application.bot.menu_v6', event_key: 'model', operator_id: 'ou_operator', event_id: 'ev1', operator_name: 'x' }
+  expect(modelMenuAction(event)).toEqual({ key: 'model', operator: 'ou_operator', id: 'ev1' })
+  expect(modelMenuAction({ ...event, type: 'card.action.trigger' })).toBeUndefined()
+  expect(modelMenuAction({ ...event, operator_id: '' })).toBeUndefined()
+})
+it('answers the /model menu with a card to the operator, and lets only that person use it', async () => {
+  const { host, selectModel, save, replies } = fixture()
+  let sent: { target: any; card: any } | undefined
+  host.sendModelCard = async (target, card) => { sent = { target, card } }
+  const commands = new FeishuCommands(host)
+  const menu = { key: 'model', operator: 'ou_operator', id: 'ev1' }
+  // A stranger, another key, or direct messages being off get nothing.
+  expect(await commands.menuAction({ ...menu, operator: 'ou_stranger' })).toBe(false)
+  expect(await commands.menuAction({ ...menu, key: 'todo' })).toBe(false)
+  host.sources.scope = () => ({ listened: false, reason: 'direct_messages_not_allowed' })
+  expect(await commands.menuAction(menu)).toBe(false)
+  expect(sent).toBeUndefined()
+  host.sources.scope = () => ({ listened: true, observed: false })
+  expect(await commands.menuAction(menu)).toBe(true)
+  expect(await commands.menuAction(menu)).toBe(true) // the same event delivered twice sends one card
+  expect(sent!.target).toEqual({ id: 'ev1', userId: 'ou_operator' })
+  const value = sent!.card.body.elements.find((e: any) => e.tag === 'button').behaviors[0].value
+  const click = (operator_id: string, token: string, chat_id = 'oc_dm') => modelCardAction({ type: 'card.action.trigger', operator_id, chat_id, token, action_value: JSON.stringify(value) })
+  // The menu names no chat, so the click's own chat is accepted — but only from the person the card was sent to.
+  expect(await commands.cardAction(click('ou_stranger', 't0'))).toBe(false)
+  expect(save).not.toHaveBeenCalled()
+  expect(await commands.cardAction(click('ou_operator', 't1'))).toBe(true)
+  expect(selectModel).toHaveBeenCalled()
+  expect((replies.at(-1) as OutboundMessage).channel.address).toMatchObject({ chatId: 'oc_dm', delivery: 'chat', direct: 'true' })
+})
+it('starts a bot-menu consumer only where the host handles menu clicks', async () => {
+  const { runFeishu } = await import('../src/sources/feishu-loops.ts')
+  const reports: number[] = []
+  for (const menuAction of [undefined, async () => true]) {
+    const ctx = { ready: Promise.resolve(), configured: () => false, report: vi.fn(), problem: undefined, deployment: {}, config: () => undefined, state: { get: vi.fn(), set: vi.fn() }, ...menuAction ? { menuAction } : {} } as unknown as SourceContext
+    const controller = new AbortController(); controller.abort()
+    await runFeishu(ctx, controller.signal)
+    reports.push((ctx.report as ReturnType<typeof vi.fn>).mock.calls.filter(call => call[0] === 'feishu').length)
+  }
+  expect(reports[1]! - reports[0]!).toBe(1)
+})
+it('sends a card to a chat, or to a user when only the operator is known', async () => {
+  const lark = vi.fn(async (_args: string[]) => ({}))
+  await sendCard({ lark } as never, { id: 'a', chatId: 'oc_x' }, { c: 1 })
+  await sendCard({ lark } as never, { id: 'b', userId: 'ou_x' }, { c: 1 })
+  expect(lark.mock.calls[0]![0]).toEqual(expect.arrayContaining(['--chat-id', 'oc_x', '--msg-type', 'interactive']))
+  expect(lark.mock.calls[1]![0]).toEqual(expect.arrayContaining(['--user-id', 'ou_x', '--msg-type', 'interactive']))
+  await expect(sendCard({ lark } as never, { id: 'c' }, {})).rejects.toThrow('Missing model card target')
 })
 it('reports a rejected selection into the chat and keeps the card usable', async () => {
   const { host, trigger, replies, resolveCallConfig } = fixture()
