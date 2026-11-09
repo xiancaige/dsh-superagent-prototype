@@ -44,6 +44,8 @@ export interface SourceContext {
   command?(trigger: Trigger): Promise<boolean>
   /** Authenticated interactive actions bypass ordinary intake. */
   cardAction?(input: unknown): Promise<boolean>
+  /** A bot-menu click; it names the operator but no chat. */
+  menuAction?(input: { key: string; operator: string; id: string }): Promise<boolean>
   atomic<T>(work: () => T): T
   /** Source-scoped KV records (such as read cursors); setting `undefined` removes an entry. */
   state: { get<V>(key: Key<V>): V | undefined; set<V>(key: Key<V>, value: V | undefined): void; keys<V>(family: Family<V, never>): Key<V>[] }

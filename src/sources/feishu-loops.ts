@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
-import { modelCardAction } from './feishu-model-card.ts'
+import { modelCardAction, modelMenuAction } from './feishu-model-card.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { feishuEnvironment } from '../infra/feishu-environment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
@@ -20,8 +20,9 @@ import type { FeishuConfig } from './feishu.ts'
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([
     watch, backfillLoop, chatNamesLoop,
-    // The CLI allows one EventKey per consumer, so interactive clicks need their own; it exists only where the host handles them.
+    // The CLI allows one EventKey per consumer, so card clicks and bot-menu clicks each need their own; each exists only where the host handles it.
     ...ctx.cardAction ? [(ctx: SourceContext, signal: AbortSignal) => watch(ctx, signal, 'card.action.trigger')] : [],
+    ...ctx.menuAction ? [(ctx: SourceContext, signal: AbortSignal) => watch(ctx, signal, 'application.bot.menu_v6')] : [],
   ].map(loop => loop(ctx, signal)))
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
 const bot = (ctx: SourceContext): FeishuBot => {
@@ -99,10 +100,15 @@ async function consume(ctx: SourceContext, signal: AbortSignal, eventKey: string
       if (line.length > 1_048_576) throw new Error('Feishu event exceeds 1 MiB')
       const raw = JSON.parse(line) as Record<string, unknown>
       const event = raw.event && typeof raw.event === 'object' ? raw.event as Record<string, unknown> : raw
-      // Card callbacks use a different event payload than message.receive_v1; do not parse them as messages.
+      // Card and menu events have their own payloads, unlike message.receive_v1; never parse them as messages.
       if (event.type === 'card.action.trigger') {
         const action = modelCardAction(event)
         if (enabled(ctx) && action) await ctx.cardAction?.(action)
+        return
+      }
+      if (event.type === 'application.bot.menu_v6') {
+        const action = modelMenuAction(event)
+        if (enabled(ctx) && action) await ctx.menuAction?.(action)
         return
       }
       const trigger = feishuTrigger(raw, bot(ctx).botId, bot(ctx).appId)

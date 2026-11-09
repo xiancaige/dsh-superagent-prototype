@@ -17,10 +17,13 @@ import type { Settings } from './settings.ts'
 import type { Sessions } from './sessions.ts'
 import type { Outbox } from './outbox.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
+import type { ModelCardTarget } from '../sources/feishu-model-card.ts'
 import { workerSessionId } from '../executor/dsh.ts'
 
 const MODEL_CARD_MAX = 20
-const cards = family<{ trigger: Trigger; at: number }>('feishu-model-card:')
+/** Who a model card was sent to: only that person's click counts. A menu click names no chat, so `chatId` may be learned from the click. */
+interface CardOwner { actor: string; chatId?: string; direct: boolean; at: number }
+const cards = family<CardOwner>('feishu-model-card:')
 const callbackSchema = z.object({ token: z.string().min(1), operator: z.object({ open_id: z.string().min(1) }),
   context: z.object({ open_chat_id: z.string(), open_message_id: z.string().optional() }),
   action: z.object({ value: z.object({ cmd: z.literal('model'), request: z.string(), provider: z.string().min(1), model: z.string().min(1) }).strict() }) })
@@ -49,7 +52,7 @@ export interface FeishuCommandsHost {
   masterId: string
   /** Explicit project root; never infer a random workspace from the host registry. */
   root?: string
-  sendModelCard?(trigger: Trigger, card: object): Promise<void>
+  sendModelCard?(target: ModelCardTarget, card: object): Promise<void>
 }
 
 export class FeishuCommands {
@@ -67,11 +70,12 @@ export class FeishuCommands {
       const parsed = callbackSchema.safeParse(input)
       if (!parsed.success) return false
       const event = parsed.data, value = event.action.value, { store, sources } = this.host
-      const saved = store.get(cards(value.request))
-      if (!saved || Date.now() - saved.at > 24 * 60 * 60 * 1000) return false
-      const original = saved.trigger
-      if (event.operator.open_id !== original.actor.id || event.context.open_chat_id !== original.meta.chatId
-        || !allowedSender(store.settings(), original.actor) || !sources.scope(original).listened) return false
+      const owner = store.get(cards(value.request))
+      const actor = { source: 'feishu', id: event.operator.open_id }
+      if (!owner || Date.now() - owner.at > 24 * 60 * 60 * 1000) return false
+      // Only the person the card was sent to may use it, in the chat it was sent to, and only while still allowed and listened to.
+      if (event.operator.open_id !== owner.actor || owner.chatId && event.context.open_chat_id !== owner.chatId
+        || !allowedSender(store.settings(), actor) || !sources.scope({ source: 'feishu', meta: { chatId: event.context.open_chat_id, direct: owner.direct } }).listened) return false
       const catalog = await this.host.context.sessionController.modelCatalog()
       if (!catalog.groups.some(group => group.id === value.provider && group.models.some(model => model.id === value.model))) return false
       const receipt = receipts(key('card-action', event.token))
@@ -82,8 +86,35 @@ export class FeishuCommands {
       store.atomic(() => {
         store.set(receipt, { text })
         this.host.outbox.send({ id: key('feishu-model-choice', event.token), kind: 'reply', text,
-          channel: { ...original.channel!, address: { ...original.channel!.address, delivery: 'chat' } } })
+          channel: { source: 'feishu', thread: `feishu:${event.context.open_chat_id}`,
+            address: { chatId: event.context.open_chat_id, delivery: 'chat', ...owner.direct ? { direct: 'true' } : {} } } })
       })
+      return true
+    })
+    this.chain = run.catch(() => {})
+    return run
+  }
+  /**
+   * A bot-menu click (`event_key` `model`). It names the person but no chat, so the card goes to their own bot chat.
+   * Same allowlist and listening rules as a typed command: a stranger, or direct messages being off, gets nothing.
+   */
+  menuAction(input: { key: string; operator: string; id: string }): Promise<boolean> {
+    const run = this.chain.then(async () => {
+      if (input.key.trim().toLowerCase() !== 'model' || !this.host.sendModelCard) return false
+      const { store, sources } = this.host
+      if (!allowedSender(store.settings(), { source: 'feishu', id: input.operator })
+        || !sources.scope({ source: 'feishu', meta: { direct: true } }).listened) return false
+      const receipt = receipts(key('menu-action', input.id))
+      if (store.get(receipt)) return true
+      const catalog = await this.host.context.sessionController.modelCatalog(), request = randomUUID()
+      store.set(cards(request), { actor: input.operator, direct: true, at: Date.now() })
+      try {
+        await this.host.sendModelCard({ id: input.id, userId: input.operator }, buildModelCard(catalog, store.settings().eval.model ?? catalog.default, request))
+        store.set(receipt, { text: 'card sent' })
+      } catch (error) {
+        // No chat id is known, so the failure cannot be shown to the person; keep it out of any topic and log it for the operator.
+        throw new Error(`model menu card failed: ${error instanceof Error ? error.message.slice(0, 160) : 'unknown'}`)
+      }
       return true
     })
     this.chain = run.catch(() => {})
@@ -103,8 +134,9 @@ export class FeishuCommands {
       try {
         if (store.get(receipts(trigger.id))) return true
         const catalog = await this.host.context.sessionController.modelCatalog(), request = randomUUID()
-        store.set(cards(request), { trigger, at: Date.now() })
-        await this.host.sendModelCard(trigger, buildModelCard(catalog, store.settings().eval.model ?? catalog.default, request))
+        const chatId = String(trigger.meta.chatId)
+        store.set(cards(request), { actor: trigger.actor.id, chatId, direct: trigger.meta.direct === true, at: Date.now() })
+        await this.host.sendModelCard({ id: trigger.id, chatId }, buildModelCard(catalog, store.settings().eval.model ?? catalog.default, request))
         store.set(receipts(trigger.id), { text: 'card sent' })
       } catch (error) {
         this.host.outbox.send({ id: key('feishu-model-card-error', trigger.id), channel: { ...trigger.channel, address: { ...trigger.channel.address, delivery: 'chat' } },
