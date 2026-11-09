@@ -45,6 +45,7 @@ import { health, type Health, type SourceContext, type SourceHost } from '../sou
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { FeishuCommands } from './feishu-commands.ts'
+import { sendModelCard } from '../sources/feishu-model-card.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
@@ -314,8 +315,10 @@ export class Runtime extends Service implements SourceHost {
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       const feishuCommands = new FeishuCommands({ context: ctx, store, settings: this.settings, sessions, outbox, sources,
-        masterId, ...(machine.sourceRoot ? { root: machine.sourceRoot } : {}) })
-      this.sourceDeps = { store, engine, outbox, commands, sources, command: trigger => feishuCommands.receive(trigger), get ready() { return runtime.ready },
+        masterId, sendModelCard: (trigger, card) => sendModelCard(commands, trigger, card),
+        ...(machine.sourceRoot ? { root: machine.sourceRoot } : {}) })
+      this.sourceDeps = { store, engine, outbox, commands, sources, cardAction: input => feishuCommands.cardAction(input),
+        command: trigger => feishuCommands.receive(trigger), get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, lifetime: this.lifetime,

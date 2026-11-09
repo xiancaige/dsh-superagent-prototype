@@ -25,6 +25,7 @@ export interface SourceContextDeps {
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   command?(trigger: Trigger): Promise<boolean>
+  cardAction?(input: unknown): Promise<boolean>
 }
 
 /**
@@ -46,6 +47,8 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     },
     receive: trigger => deps.receive(trigger),
     command: trigger => deps.command?.(trigger) ?? Promise.resolve(false),
+    // Absent when the host has no interactive handler, so the Feishu Source starts no card consumer.
+    ...deps.cardAction ? { cardAction: (input: unknown) => deps.cardAction!(input) } : {},
     atomic: work => store.atomic(work),
     state: {
       get: name => store.get(name),

@@ -4,6 +4,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { readFile, realpath } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import { resolve, relative, isAbsolute } from 'node:path'
 import { key, type Trigger } from '../core/index.ts'
 import { allowedSender, type RoleModel } from '../policy.ts'
@@ -17,6 +19,24 @@ import type { Outbox } from './outbox.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { workerSessionId } from '../executor/dsh.ts'
 
+const MODEL_CARD_MAX = 20
+const cards = family<{ trigger: Trigger; at: number }>('feishu-model-card:')
+const callbackSchema = z.object({ token: z.string().min(1), operator: z.object({ open_id: z.string().min(1) }),
+  context: z.object({ open_chat_id: z.string(), open_message_id: z.string().optional() }),
+  action: z.object({ value: z.object({ cmd: z.literal('model'), request: z.string(), provider: z.string().min(1), model: z.string().min(1) }).strict() }) })
+export function buildModelCard(catalog: Awaited<ReturnType<FeishuCommandsHost['context']['sessionController']['modelCatalog']>>, current?: RoleModel | null, request?: string): object {
+  const rows = catalog.groups.flatMap(group => group.models.map(model => ({ provider: group.id, model: model.id })))
+  const active = current ? `${current.provider}/${current.model}` : ''
+  const elements: Record<string, unknown>[] = [{ tag: 'markdown', content: `当前模型：${active || '默认'}\n${rows.length} 个模型，点击按钮切换` }]
+  for (const row of rows.slice(0, MODEL_CARD_MAX)) {
+    const selected = active === `${row.provider}/${row.model}`
+    elements.push({ tag: 'button', text: { tag: 'plain_text', content: `${selected ? '✓ ' : ''}${row.provider} / ${row.model}`.slice(0, 40) },
+      type: selected ? 'primary' : 'default', width: 'fill', behaviors: [{ type: 'callback', value: { cmd: 'model', ...row, ...request ? { request } : {} } }] })
+  }
+  if (rows.length > MODEL_CARD_MAX) elements.push({ tag: 'markdown', content: `其余 ${rows.length - MODEL_CARD_MAX} 个模型未显示；使用 /model <provider> <model> 切换` })
+  return { schema: '2.0', config: { update_multi: true }, header: { title: { tag: 'plain_text', content: '选择模型' } }, body: { elements } }
+}
+
 const receipts = family<{ text: string }>('feishu-command:')
 const HELP = '/todo [编号]：项目待办；/model [页码]：模型目录；/model <provider> <model> [all|main|worker|工单ID]：切换，默认 all。兼容 /mode。'
 export interface FeishuCommandsHost {
@@ -29,6 +49,7 @@ export interface FeishuCommandsHost {
   masterId: string
   /** Explicit project root; never infer a random workspace from the host registry. */
   root?: string
+  sendModelCard?(trigger: Trigger, card: object): Promise<void>
 }
 
 export class FeishuCommands {
@@ -37,6 +58,34 @@ export class FeishuCommands {
   /** Serialize live/history copies so a message executes at most once in this host. */
   receive(trigger: Trigger): Promise<boolean> {
     const run = this.chain.then(() => this.handle(trigger))
+    this.chain = run.catch(() => {})
+    return run
+  }
+  /** CLI normalizes the SDK callback; serialize clicks with text commands and reuse their selection path. */
+  cardAction(input: unknown): Promise<boolean> {
+    const run = this.chain.then(async () => {
+      const parsed = callbackSchema.safeParse(input)
+      if (!parsed.success) return false
+      const event = parsed.data, value = event.action.value, { store, sources } = this.host
+      const saved = store.get(cards(value.request))
+      if (!saved || Date.now() - saved.at > 24 * 60 * 60 * 1000) return false
+      const original = saved.trigger
+      if (event.operator.open_id !== original.actor.id || event.context.open_chat_id !== original.meta.chatId
+        || !allowedSender(store.settings(), original.actor) || !sources.scope(original).listened) return false
+      const catalog = await this.host.context.sessionController.modelCatalog()
+      if (!catalog.groups.some(group => group.id === value.provider && group.models.some(model => model.id === value.model))) return false
+      const receipt = receipts(key('card-action', event.token))
+      if (store.get(receipt)) return true
+      let text: string
+      try { text = imSummary(await this.model([value.provider, value.model], event.token)) }
+      catch (error) { text = imSummary(`命令未完成：${error instanceof Error ? error.message.slice(0, 120) : '执行失败'}。可重新点击或发 /model 重试。`) }
+      store.atomic(() => {
+        store.set(receipt, { text })
+        this.host.outbox.send({ id: key('feishu-model-choice', event.token), kind: 'reply', text,
+          channel: { ...original.channel!, address: { ...original.channel!.address, delivery: 'chat' } } })
+      })
+      return true
+    })
     this.chain = run.catch(() => {})
     return run
   }
@@ -50,6 +99,19 @@ export class FeishuCommands {
     // Thread subscriptions do NOT grant command privileges. Bots, unlisted people and unaddressed group messages cannot act.
     if (!trigger.human || !allowedSender(store.settings(), trigger.actor) || !trigger.addressed || !sources.scope(trigger).listened) return true
     if (!trigger.channel) return true
+    if (match[1]!.toLowerCase() === '/model' && !(match[2] ?? '').trim() && this.host.sendModelCard) {
+      try {
+        if (store.get(receipts(trigger.id))) return true
+        const catalog = await this.host.context.sessionController.modelCatalog(), request = randomUUID()
+        store.set(cards(request), { trigger, at: Date.now() })
+        await this.host.sendModelCard(trigger, buildModelCard(catalog, store.settings().eval.model ?? catalog.default, request))
+        store.set(receipts(trigger.id), { text: 'card sent' })
+      } catch (error) {
+        this.host.outbox.send({ id: key('feishu-model-card-error', trigger.id), channel: { ...trigger.channel, address: { ...trigger.channel.address, delivery: 'chat' } },
+          text: imSummary(`模型卡片发送失败：${error instanceof Error ? error.message.slice(0, 120) : '未知错误'}`), kind: 'reply' })
+      }
+      return true
+    }
     const receipt = receipts(trigger.id)
     let response = store.get(receipt)?.text
     if (response === undefined) {
