@@ -131,22 +131,22 @@ export class Runtime extends Service implements SourceHost {
    * block. The rollout's values win over the process environment, so the repository is the desired state.
    */
   private recoverySettings(): RecoverySettings {
-    const configured = this.machine.environment
-    if (configured?.recoveryEnabled === true) {
+    const rollout = this.mounted.environment
+    if (rollout?.recoveryEnabled === true) {
       // setup-superagent.mjs already refused a section whose paths are missing or relative; a hand-edited
       // patch that enables the environment without them is a startup error, never a silent disable.
-      const missing = (['projectFile', 'editorExe'] as const).filter(key => !configured[key]?.trim())
+      const missing = (['projectFile', 'editorExe'] as const).filter(key => !rollout[key]?.trim())
       if (missing.length) throw new Error(`dsh-superagent environment.recoveryEnabled is true but ${missing.join(' and ')} is not set; the rollout block must name the absolute TP project and editor`)
       const environment: TpEditorEnvironment = {
-        projectFile: configured.projectFile!, editorExe: configured.editorExe!, port: configured.mcpPort,
-        captureTool: configured.captureTool, captureToolset: configured.captureToolset,
-        ...configured.waitSeconds !== undefined ? { waitSeconds: configured.waitSeconds } : {},
+        projectFile: rollout.projectFile!, editorExe: rollout.editorExe!, port: rollout.mcpPort,
+        captureTool: rollout.captureTool, captureToolset: rollout.captureToolset,
+        ...rollout.waitSeconds !== undefined ? { waitSeconds: rollout.waitSeconds } : {},
       }
       return { enabled: true, environment }
     }
     // A rollout section that exists but disables recovery means no environment at all: the process
     // environment is not allowed to re-enable what the repository switched off.
-    if (configured) return { enabled: false }
+    if (rollout) return { enabled: false }
     if (process.env.DSH_SUPERAGENT_EDITOR_RECOVERY !== '1') return { enabled: false }
     const projectFile = process.env.DSH_SUPERAGENT_TP_PROJECT
     const editorExe = process.env.DSH_SUPERAGENT_TP_EDITOR_EXE
@@ -169,7 +169,7 @@ export class Runtime extends Service implements SourceHost {
   private environmentHost(): { broker: EnvironmentExclusivity; tickets: TicketedEnvironment } | undefined {
     const environment = this.recoverySettings().environment
     if (!environment) return undefined
-    const broker = new EnvironmentExclusivity(this.machine.stateDir)
+    const broker = new EnvironmentExclusivity(this.mounted.stateDir)
     const tickets = new TicketedEnvironment(broker, { projectFile: environment.projectFile, port: environment.port }, {
       stopEditor: ticketId => this.stopTicketEditor(ticketId, environment),
       ownsEditor: ticketId => !!this.editorRecovery?.owns(ticketId),
@@ -189,7 +189,7 @@ export class Runtime extends Service implements SourceHost {
         recordedPid: (ticketId: string) => environment.tickets.recordedPid(ticketId),
         recordedStart: (ticketId: string) => environment.tickets.recordedStart(ticketId),
       } : {},
-    }, this.machine.stateDir)
+    }, this.mounted.stateDir)
     this.editorRecovery = adapter
     return {
       adapter,
@@ -209,9 +209,13 @@ export class Runtime extends Service implements SourceHost {
       }),
     }
   }
-  constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
+  constructor(ctx: Context, readonly mounted: Machine, restart: () => void) {
     super(ctx, 'orchestrator')
     const runtime = this
+    // `mounted` is the workspace this plugin is running with: the configuration plus any panel override that
+    // was saved before this mount. Its `stateDir` decides where the database lives, so the lock and the store
+    // below are keyed to it — a saved change to any of these fields only applies through a restart.
+    const machine: Machine = mounted
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
@@ -370,7 +374,7 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, this.mounted.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -448,8 +452,8 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks,
       context: kind => runtime.context(kind),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },

@@ -97,15 +97,28 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+/**
+ * Workspace overrides saved from the panel. An empty string or null means "inherit the plugin configuration",
+ * so a deployment keeps working unchanged until someone edits the panel. These are constructor-time values:
+ * saving one restarts dsh-superagent and only affects tickets created afterwards.
+ */
+export const WorkspaceConfigSchema = z.object({
+  stateDir: z.string().trim().refine(path => path === '' || posix.isAbsolute(path) || win32.isAbsolute(path), 'An absolute path, or empty to inherit the configuration').default(''),
+  workspaceMode: z.enum(['isolated', 'source']).nullable().default(null),
+  sourceRoot: z.string().trim().refine(path => path === '' || posix.isAbsolute(path) || win32.isAbsolute(path), 'An absolute path, or empty to inherit the configuration').default(''),
+  executionMode: z.enum(['github', 'local']).nullable().default(null),
+}).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  workspace: WorkspaceConfigSchema.default(() => WorkspaceConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'workspace' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

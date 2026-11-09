@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, WorkspaceConfigSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -13,6 +13,7 @@ import type { Sessions } from './sessions.ts'
 import { setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { verifyWorkspace } from '../deployment.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -22,6 +23,9 @@ export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
 const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+/** Workspace fields are read when dsh-superagent mounts, so a change here applies only after it restarts. */
+const workspace = ({ workspace }: SettingsValue) => JSON.stringify([workspace.stateDir, workspace.workspaceMode, workspace.sourceRoot, workspace.executionMode])
+const workspaceChanged = (current: SettingsValue, candidate: SettingsValue): boolean => workspace(current) !== workspace(candidate)
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -29,7 +33,7 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'workspace' | 'source', Block> = {
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -43,6 +47,18 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
     // Only the management panel may modify shell execution paths or commands.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+  },
+  workspace: {
+    // Reject a selection that would make the next mount throw, using the same rules startup applies.
+    parse: value => {
+      const parsed = WorkspaceConfigSchema.parse(value)
+      verifyWorkspace({ stateDir: parsed.stateDir, workspaceMode: parsed.workspaceMode ?? undefined, sourceRoot: parsed.sourceRoot,
+        executionMode: parsed.executionMode ?? undefined })
+      return parsed
+    },
+    merge: (settings, value) => ({ ...settings, workspace: value as SettingsValue['workspace'] }),
+    // Where tickets land is a deployment decision the panel owns, like shell paths.
+    guard: (current, candidate, origin) => { if (origin !== 'panel' && workspaceChanged(current, candidate)) throw new UserError('panelOnlyWorkspace') },
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
@@ -173,7 +189,9 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
+    // Account fields trigger setup, and a workspace change is only read when the plugin mounts again, so both
+    // restart dsh-superagent. Without that, the panel would show a choice the running deployment does not use.
+    const restarting = setupChanged(old, settings) || workspaceChanged(old, settings) || !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })

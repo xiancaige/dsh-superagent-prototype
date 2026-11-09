@@ -133,7 +133,7 @@ it('answers only a same-origin request from the panel on the loopback address', 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
   const saves: unknown[] = []
   const call = serve({
-    machine: { promptMaxChars: { get: () => 100_000 } },
+    mounted: { promptMaxChars: { get: () => 100_000 } },
     store: { atomic: (work: () => unknown) => work(), blockRevision: () => 0 },
     prompts: { save: () => { throw new PromptConflict('Prompt version changed to 3; compare the latest version before saving') } },
     sessions: { notify: () => {}, delivery: async () => 'injected' },
