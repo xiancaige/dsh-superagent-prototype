@@ -398,6 +398,15 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/feishu-model-card.ts` | The Feishu card and bot-menu projections of the TP `/model` command, answered within the CLI's three-second callback window |
+| `src/app/feishu-commands.ts` | The TP operator commands of the Feishu Source (`/model`, `/todo`, `/help`): who may run one, and the receipt that keeps a replayed command from running twice |
+| `src/app/ticket-analysis.ts` | The ticket-analysis effect the orchestrator calls directly when a ticket ends, so reflection never waits on a broadcast listener |
+| `src/sources/wecom.ts` | The WeCom kind and plugin entry, exported as `./wecom-watch`: the chats, the Policy, the Channel and the long connection |
+| `src/sources/wecom-trigger.ts` | WeCom callbacks as Triggers, and the chat, topic and reply addresses they use |
+| `src/sources/wecom-loops.ts` | The WeCom long connection: subscribe, reconnect, callback intake, and the reply window of each message |
+| `src/sources/wecom-channel.ts` | The WeCom Channel: a reply through the callback's `req_id`, its push fallback, and chat links |
+| `src/sources/wecom-protocol.ts` | The WeCom protocol: the long connection's commands, the callback schemas, and the official client's surface |
+| `src/sources/wecom-connection.ts` | The running WeCom connection the kind's Channel replies through |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -421,7 +430,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/wecom.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./wecom-watch`. The bundle's `cordis.patch.yml` inserts the plugins, with Feishu and WeCom disabled.
 
 ## Tests
 
@@ -451,6 +460,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/wecom.spec.ts` | The WeCom Source: callbacks as Triggers, the receiving scope, the Channel's reply and push, the bot's account, and the plugin's registration |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-environment.spec.ts` | Feishu child configuration isolation, ambient credential and workspace-marker tombstones, and host environment preservation |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
@@ -480,6 +490,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
+| `tests/route.spec.ts` | The panel's typed routes: parsing, the settings group opened last, and the pages each route names |
+| `tests/feishu-commands.spec.ts` | The TP Feishu operator commands: admission, the model selection they apply, and the receipts that deduplicate a replayed callback |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/environment-config.spec.ts` | The rollout's `environment` section: absent or disabled stays `recoveryEnabled: false` (no environment, `held:false`, `noEnvironment`), an enabled section reaches the plugin config through a valid YAML block, and a wrong path, port or key fails loudly in `setup-superagent.mjs` instead of disabling silently |
