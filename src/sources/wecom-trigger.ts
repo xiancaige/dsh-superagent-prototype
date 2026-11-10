@@ -37,6 +37,16 @@ export function wecomQuoteText(message: WecomMessage): string | undefined {
   return text ? `> ${text.slice(0, 500)}` : `>[${quote.msgtype}]`
 }
 /**
+ * The ticket a quote points at: a reply this Source sent carries `工单 #<id>` in its card title and source line, so a
+ * person quoting that reply names that ticket even though WeCom has no thread object. Read here and handed to the core,
+ * which lets a quoted question reach its own ticket while a plain message always asks for new work.
+ */
+export function wecomQuotedTicket(message: WecomMessage): string | undefined {
+  const quoted = wecomQuoteText(message)
+  if (!quoted) return undefined
+  return /工单\s*#([0-9a-fA-F]{4,32})/.exec(quoted)?.[1]?.toLowerCase()
+}
+/**
  * Converts one callback into a Trigger. Callbacks reach dsh-superagent for people only, so the sender is `human`; a direct
  * message always addresses the bot, whereas a group message reaches it only when someone mentions it. A message with no
  * readable text (a bare file, for instance) still arrives, as its placeholder, so the person is answered rather than ignored.
@@ -49,9 +59,13 @@ export function wecomTrigger(message: WecomMessage): Trigger | undefined {
   const text = wecomText(message)
   if (!text) return undefined
   const quote = wecomQuoteText(message)
+  const quotedTicket = wecomQuotedTicket(message)
   return { id: wecomTriggerId(message.msgid), source: SOURCE, threads: [{ source: SOURCE, id: wecomThreadId(chatId) }],
     actor: { source: SOURCE, id: message.from.userid || chatId }, human: true,
-    addressed: direct ? 'direct' : 'mention', at: at(message.create_time), text: quote ? `${quote}\n${text}` : text,
+    // A quote that names a ticket carries only that address: its body is an older reply, which would otherwise bury
+    // what the person is saying now. Any other quote stays as context ahead of the message.
+    addressed: direct ? 'direct' : 'mention', at: at(message.create_time), text: quote && !quotedTicket ? `${quote}\n${text}` : text,
     channel: wecomChannel(chatId, message.msgid, direct),
-    meta: { chatId, messageId: message.msgid, direct, chattype: message.chattype, msgtype: message.msgtype } }
+    meta: { chatId, messageId: message.msgid, direct, chattype: message.chattype, msgtype: message.msgtype,
+      ...(quotedTicket ? { quotedTicket } : {}) } }
 }

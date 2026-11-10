@@ -1,6 +1,5 @@
 /** The WeCom Channel: answers the callback a message came from, falls back to the chat's push, and builds chat links. */
 import type { OutboundMessage } from '../core/index.ts'
-import { checkedImText } from '../infra/text.ts'
 import { wecomSender } from './wecom-connection.ts'
 import { WecomApiError, WECOM_COMMANDS, wecomAck, type WecomSdkFrame } from './wecom-protocol.ts'
 import { wecomTriggerId } from './wecom-trigger.ts'
@@ -13,18 +12,40 @@ export const WECOM_MARKDOWN_BYTES = 4096
 /** Tells a reader where the rest of a shortened message is. */
 const SHORTENED = '…（全文见本地面板）'
 /**
- * Trims a message to what WeCom renders. A reply or notice is shortened with an ellipsis and a pointer to the panel, because
- * a person must still be told what happened; an acknowledgement over the limit is refused instead, so the main Session
- * writes a shorter one, as on Feishu. Both are checked for the 100-word limit first, which asks for a summary, not a cut.
+ * Trims a message to what a WeCom card renders. The 100-word ceiling is applied upstream, where a long reply becomes a
+ * summary plus a file path; this only bounds the bytes WeCom accepts, shortening with a pointer to the panel.
  */
 function markdown(text: string): string {
-  const checked = checkedImText(text)
   const limit = WECOM_MARKDOWN_BYTES - Buffer.byteLength(SHORTENED, 'utf8')
-  if (Buffer.byteLength(checked, 'utf8') <= WECOM_MARKDOWN_BYTES) return checked
-  let out = checked
+  if (Buffer.byteLength(text, 'utf8') <= WECOM_MARKDOWN_BYTES) return text
+  let out = text
   while (Buffer.byteLength(out, 'utf8') > limit) out = out.slice(0, Math.floor(out.length * 0.9))
   return `${out}${SHORTENED}`
 }
+/**
+ * The ticket tag a person can quote to address that ticket again. WeCom has no thread or topic object, and its `quote`
+ * carries text only, so the tag travels as text inside both the card title and its source line: a quote that contains
+ * it names the ticket exactly, which is the only way a chat can address one of its earlier tickets.
+ */
+export const wecomTicketTag = (ticketId: string | undefined): string => (ticketId ? `工单 #${ticketId.slice(0, 8)}` : '')
+
+/** One reply as a `text_notice` template card; without a ticket it is a plain card with the bot's name. */
+export function wecomTicketCard(text: string, ticketId: string | undefined): Record<string, unknown> {
+  const tag = wecomTicketTag(ticketId)
+  return {
+    card_type: 'text_notice',
+    main_title: { title: tag ? `${tag} 更新` : '超级智能体' },
+    sub_title_text: text.trim().slice(0, WECOM_MARKDOWN_BYTES),
+    ...(tag ? { source: { desc: tag, desc_color: 1 } } : {}),
+  }
+}
+
+/** The reply as plain markdown carrying the same tag, for a client that refuses the card or a test that reads text. */
+export function wecomTicketMarkdown(text: string, ticketId: string | undefined): string {
+  const tag = wecomTicketTag(ticketId)
+  return tag ? `${text}\n\n> ${tag}` : text
+}
+
 /**
  * Posts one message to its chat. A reply goes through the callback's `req_id` while the connection holds it (WeCom keeps one
  * for 48 hours); after that window, and for a message meant for a chat rather than an answer, it goes through the chat's
@@ -38,8 +59,10 @@ export async function sendWecom(_host: unknown, message: OutboundMessage): Promi
   const { chatId, messageId, delivery } = message.channel.address
   if (!chatId) throw new Error('Missing WeCom chat target')
   const frame = delivery === 'respond' && messageId ? sender.frame(messageId) : undefined
-  // Markdown is what a WeCom answer renders; the same body answers the callback and, after its window, the chat's push.
-  const content = markdown(message.text)
+  // The card is what a person sees; the markdown body is the same reply for a client that refuses it.
+  // The reply is markdown text carrying `> 工单 #<id>`, which is what a person's quote returns; a template card was
+  // tried and refused by this bot, and text keeps the tag in the one field WeCom gives back for a quote.
+  const content = markdown(wecomTicketMarkdown(message.text, message.ticketId))
   if (frame) {
     const client = sender.client()
     if (client) {

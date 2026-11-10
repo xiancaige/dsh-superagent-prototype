@@ -1,7 +1,9 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
 import { key, type OutboundMessage, type Outbox as OutboxPort, type ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
-import { checkedImText, imSummary } from '../infra/text.ts'
+import { checkedImText, imSummary, imText } from '../infra/text.ts'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Mirror } from './mirror.ts'
@@ -33,12 +35,28 @@ export class Outbox implements OutboxPort {
     // Feishu's chat limit is checked before a receipt is kept, so a reply that is too long fails visibly instead of silently.
     // Acknowledgements were checked when the decision made them, and other Sources bound their own message lengths.
     if (message.kind === 'reply' && message.channel.source === 'feishu') checkedImText(message.text)
+    // A reply over the IM limit is sent as a summary with the full text written beside the project, rather than refused:
+    // a refused message stays pending forever, and the person would never learn what the ticket found.
+    if (message.kind === 'reply') message = { ...message, text: imText(message.text, full => this.writeFullText(message.ticketId, full)) }
     const { store, effects } = this.host
     store.atomic(() => {
       if (!store.receipts.add(message)) return
       effects.enqueue('reply', message.id, {})
       this.copy(message)
     })
+  }
+  /** Writes a reply's full text under the checkout's `AICraft/` and returns the path a person can open; `undefined` on failure. */
+  private writeFullText(ticketId: string | undefined, full: string): string | undefined {
+    if (!ticketId) return undefined
+    try {
+      const dir = join(process.env.DSH_SUPERAGENT_WORKSPACE || process.cwd(), 'AICraft')
+      mkdirSync(dir, { recursive: true })
+      const file = join(dir, `ticket-${ticketId.slice(0, 8)}-report.md`)
+      writeFileSync(file, `# 工单 ${ticketId}\n\n${full}\n`, 'utf8')
+      return file
+    } catch {
+      return undefined
+    }
   }
   /** Queue the Feishu copy of a reply to a local-panel ticket; its address names the ticket, whose topic is made when it is sent. */
   private copy(message: OutboundMessage): void {

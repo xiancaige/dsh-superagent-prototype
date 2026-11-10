@@ -88,6 +88,15 @@ describe('wecom source', () => {
       channel: { source: 'wecom', thread: `wecom:${GROUP}`, address: { chatId: GROUP, messageId: 'MSG1234567890ab', delivery: 'respond' } },
       meta: { chatId: GROUP, messageId: 'MSG1234567890ab', direct: false, chattype: 'group', msgtype: 'text' } })
   })
+  it('drops a quoted reply that only names a ticket, and keeps any other quote as context', () => {
+    const tagged = triggerOf(message({ quote: { msgtype: 'text', text: { content: '收到。\n\n> 工单 #abcdef12' } }, text: { content: '冲刺距离改成 800' } }))
+    // The tag addresses the ticket; the quoted reply itself would bury what the person is asking now.
+    expect(tagged?.text).toBe('冲刺距离改成 800')
+    expect(tagged?.meta.quotedTicket).toBe('abcdef12')
+    const plain = triggerOf(message({ quote: { msgtype: 'text', text: { content: '普通引用' } }, text: { content: '继续' } }))
+    expect(plain?.text).toContain('普通引用')
+    expect(plain?.meta.quotedTicket).toBeUndefined()
+  })
   it('keys a direct chat by its sender, and reads speech, images and quotes as text', () => {
     // A direct message carries no chatid, and it always addresses the bot.
     const direct = triggerOf(message({ chatid: undefined, chattype: 'single' }))
@@ -124,7 +133,7 @@ describe('wecom source', () => {
     expect(await sendWecom(undefined, outbound({ chatId: GROUP, messageId: 'MSG1', delivery: 'respond' }))).toBe('sent')
     // The stored req_id, not the frame's, so a retried reply answers the same callback rather than posting twice.
     expect(replyOf(connected).mock.calls[0]).toEqual([expect.objectContaining({ headers: expect.objectContaining({ req_id: 'req-stored' }) }),
-      { msgtype: 'markdown', markdown: { content: 'Working on it.' } }])
+      { msgtype: 'markdown', markdown: { content: expect.stringContaining('工单 #') } }])
     // An expired window (846608) falls back to the chat's push, which needs no callback.
     const openRootPushed = vi.fn()
     const pushed = client({ rows })
@@ -154,19 +163,29 @@ describe('wecom source', () => {
   it('bounds a message to the bytes and words WeCom renders', async () => {
     const connected = client({ rows: [] })
     setWecomSender(sender(connected, frame({})))
-    // 100 single-letter words (at the word limit) followed by one unbroken run, so the text passes the word check at 4198
-    // bytes and only the 4096-byte limit applies.
+    // A body over the 4096 bytes WeCom renders is shortened with a pointer to the panel, tag included.
     const long = `${'x '.repeat(99)}${'x'.repeat(4000)}`
     await sendWecom(undefined, { id: 'i', kind: 'reply', text: long, ticketId: 't',
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
     const body = replyOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
-    // The panel pointer is what a reader sees in place of the rest, and the whole body still fits what WeCom renders.
     expect(body.markdown.content.endsWith('…（全文见本地面板）')).toBe(true)
     expect(Buffer.byteLength(body.markdown.content)).toBeLessThanOrEqual(4096)
-    // The 100-word limit is checked first: a message over it asks for a summary instead of being cut.
-    await expect(sendWecom(undefined, { id: 'j', kind: 'reply', text: 'word '.repeat(101), ticketId: 't',
-      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } }))
-      .rejects.toThrow(/maximum is 100/)
+  })
+  it('names the ticket in the reply, so a quote of it addresses that ticket again', async () => {
+    const connected = client({ rows: [] })
+    setWecomSender(sender(connected, frame({})))
+    await sendWecom(undefined, { id: 'k', kind: 'reply', text: 'Done.', ticketId: 'abcdef1234567890',
+      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
+    const body = replyOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    // The tag rides in the text, which is the only field WeCom returns for a quote.
+    expect(body.markdown.content).toContain('工单 #abcdef12')
+    // A reply with no ticket carries no tag at all.
+    const untagged = client({ rows: [] })
+    setWecomSender(sender(untagged, frame({})))
+    await sendWecom(undefined, { id: 'l', kind: 'reply', text: 'Hello.', ticketId: undefined,
+      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
+    const plain = replyOf(untagged).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    expect(plain.markdown.content).not.toContain('工单 #')
   })
   it('links a chat through the WeCom scheme and names the Trigger of its message', () => {
     expect(wecomLink({ chatId: `single:${MEMBER}`, messageId: 'M1' })).toEqual({ url: `wxwork://message?chatid=${MEMBER}`,
