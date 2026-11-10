@@ -29,7 +29,11 @@ export const wecomKind: SourceKind<WecomConfig> = {
     { key: 'botId', type: 'text', label: { zh: '机器人 ID', en: 'Bot ID' },
       hint: { zh: '企业微信管理后台的智能机器人 ID，API 模式须为长连接。保存后重启 dsh-superagent 生效。', en: 'The intelligent bot ID from the WeCom admin console, whose API mode must be the long connection. Saving restarts dsh-superagent.' } },
     { key: 'secretVariable', type: 'text', advanced: true, label: { zh: '存放密钥的环境变量', en: 'Secret environment variable' },
-      hint: { zh: '机器人密钥只从这个环境变量读取，不写进设置，也不进日志和会话。长连接模式下密钥与管理后台的展示一致。', en: 'The bot secret is read only from this environment variable; it is never written into the settings, the logs or a Session. In long-connection mode it is the secret the admin console shows.' } },
+      hint: { zh: '机器人密钥存放在本机 secrets.env 的这个变量名里，不写进设置，也不进日志和会话。默认 WECOM_BOT_SECRET。', en: 'The bot secret lives in this variable inside the local secrets.env; it is never written into the settings, the logs or a Session. Defaults to WECOM_BOT_SECRET.' } },
+    // 不是设置字段：保存时由面板单独 PUT 到 source:wecom/secret，写进本机 secrets.env 并注入 process.env。
+    { key: 'secret', type: 'password', advanced: true, write: 'source:wecom/secret', secretOf: 'secretVariable',
+      label: { zh: '机器人密钥', en: 'Bot secret' },
+      hint: { zh: '在这里填入企业微信智能机器人的密钥，保存后写入本机 secrets.env 并立即生效。留空表示不修改。', en: 'Paste the WeCom intelligent bot secret here; saving writes it into the local secrets.env and applies it immediately. Leave empty to keep the current value.' } },
     { key: 'chats', type: 'rows', label: { zh: '接收的群', en: 'Chats' },
       hint: { zh: '“仅 @”只接收 @ 机器人的消息和已有工单的会话；“全部消息”也接收其余群消息，由策略决定它们能否成为候选。', en: '"@ only" receives messages that mention the bot and chats a ticket already holds; "All" also receives the rest, and the Policy decides whether they become candidates.' },
       columns: [

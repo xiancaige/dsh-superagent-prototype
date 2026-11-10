@@ -28,3 +28,18 @@ export const fill = (template: string, values: Record<string, string>): string =
 /** Case-insensitive comparison for GitHub logins and repository names. */
 export const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
 export const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Fits an outgoing IM message inside `IM_WORDS`: the text unchanged when it already fits, else a summary plus a pointer
+ * to a file holding the full text. A review conclusion rarely fits in 100 words, and a refused message is worse than a
+ * short one — it stays pending and the person sees nothing at all.
+ * @param write persists the full text and returns the readable path, or `undefined` to summarize without one.
+ */
+export function imText(text: string, write?: (full: string) => string | undefined): string {
+  const full = String(text ?? '')
+  const count = wordCount(full)
+  if (count <= IM_WORDS) return full
+  const file = write?.(full)
+  const summary = imSummary(full, IM_WORDS - 20, '')
+  return file ? `${summary}\n\n（共 ${count} 个词，全文见 ${file}）` : imSummary(full)
+}

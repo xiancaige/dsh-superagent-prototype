@@ -16,6 +16,7 @@ import { DELIVERY_LEVELS } from '../core/delivery.ts'
 import { ReviewConfigurationRequest, ReviewDecisionRequest } from '../core/review.ts'
 import { DesignConfigurationRequest, DesignApprovalRequest } from '../core/design.ts'
 import type { Deployment, Machine } from '../deployment.ts'
+import { writeSecret } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health, SourceContext } from '../sources/host.ts'
 import { LOCAL, LocalConflict, LocalId, localMessages, receiveLocal } from '../sources/local.ts'
@@ -157,6 +158,8 @@ const PromptsQuery = z.object({ revision: count.optional(), offset: count.defaul
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
+/** Panel fields that are written through their own endpoint and never belong in the saved settings. */
+const SECRET_FIELDS = ['secret'] as const
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
@@ -274,7 +277,25 @@ function routes(runtime: HttpHost): Routes {
       const known = !block.startsWith('source:') || runtime.sources.instances().some(instance => `source:${instance.id}` === block)
       if (!known) throw new RouteError(404, 'Source not found')
       const request = SaveRequest.parse(await body())
+      // Write-only secret fields (such as the WeCom bot secret) are posted to their own endpoint and never saved into the
+      // settings; drop them here so a form carrying one still saves instead of failing with "Unrecognized key".
+      const value = request.value as { config?: Record<string, unknown> } | undefined
+      if (value && typeof value === 'object' && value.config && typeof value.config === 'object') {
+        const config = { ...value.config }
+        for (const field of SECRET_FIELDS) delete config[field]
+        return runtime.settings.save(block, { ...value, config }, request.revision, 'panel')
+      }
       return runtime.settings.save(block, request.value, request.revision, 'panel')
+    },
+    'PUT source:wecom/secret': async ({ body }) => {
+      const input = z.object({
+        variable: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/, 'Environment variable name'),
+        secret: z.string().trim().min(1).max(4096),
+      }).strict().parse(await body())
+      const file = writeSecret(input.variable, input.secret)
+      // The running deployment reads the variable on its next setup check, so publish it without a restart.
+      process.env[input.variable] = input.secret
+      return { saved: true, variable: input.variable, file }
     },
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),

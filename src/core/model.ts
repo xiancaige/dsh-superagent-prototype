@@ -72,7 +72,7 @@ export interface FollowupRecords {
  * an Eval holds it, which an earlier version may have queued. While a ticket owns it, the message goes to no Eval, and the
  * main Session may only stop the work on it.
  */
-export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords): string[] {
+export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads' | 'source' | 'meta'>, records: FollowupRecords): string[] {
   if (!trigger.human) return []
   const disposition = records.triggers.disposition(trigger.id)
   if (!disposition || disposition.requeued) return []
@@ -80,6 +80,15 @@ export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'
   const returned = new Set(disposition.handbacks?.map(item => item.ticketId))
   const reached = disposition.fanout.filter(id => !returned.has(id) && !disposition.context?.includes(id))
   if (!reached.length || records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
+  // A WeCom chat is one Thread for every ticket ever raised in it, and the Source has no topic object to split them.
+  // The operator's rule for that Source: a plain message always asks for new work, and only a quote of a tagged reply
+  // (`工单 #<id>`, read into `meta.quotedTicket`) addresses an existing ticket. So no existing ticket absorbs a plain one.
+  if (trigger.source === 'wecom') {
+    const quoted = trigger.meta?.quotedTicket
+    if (typeof quoted !== 'string' || !quoted) return []
+    const named = reached.filter(id => id.toLowerCase().startsWith(quoted))
+    return named.length === 1 ? named : []
+  }
   return reached.filter(id => {
     const ticket = records.tickets.get(id)
     return !!ticket && (liveTicket(ticket) || (ticket.ended?.by !== 'human'

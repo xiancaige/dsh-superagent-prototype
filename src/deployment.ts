@@ -1,7 +1,7 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
-import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
@@ -246,11 +246,58 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
 }
 
 /**
- * Resolve the WeCom intelligent bot the long connection subscribes as. The secret is never stored in the settings: the
- * settings name an environment variable, which is read here and kept only in the resolved deployment. Every failure names
- * the account field the operator fixes, so the Source stays out without stopping the rest of the deployment.
+ * The local file the panel writes an operator's secret into: `secrets.env` under the DSH home, one `NAME=value` per
+ * line. It exists because the panel offers a secret field, and storing that value in the settings, a log or a Session
+ * would leak it; a file this process reads keeps the setting a variable name only.
  */
-export function resolveWecomBot(wecom: unknown, lookup: (name: string) => string | undefined = name => process.env[name]): WecomBot | undefined {
+export const secretsFile = (): string | undefined => {
+  const home = process.env.DSH_HOME || (process.env.USERPROFILE ? join(process.env.USERPROFILE, '.dsh') : undefined)
+  return home ? join(home, 'secrets.env') : undefined
+}
+
+/** Reads `name` from the local secrets file; a missing, unreadable or line-less file yields `undefined`. */
+export function readSecret(name: string): string | undefined {
+  const file = secretsFile()
+  if (!file || !existsSync(file)) return undefined
+  try {
+    for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eq = trimmed.indexOf('=')
+      if (eq <= 0) continue
+      if (trimmed.slice(0, eq).trim() === name) return trimmed.slice(eq + 1).trim()
+    }
+  } catch {
+    // An unreadable file is the same as no file: the caller reports the missing secret.
+  }
+  return undefined
+}
+
+/** Writes `name=value` into the local secrets file, replacing an existing assignment and keeping the file private. */
+export function writeSecret(name: string, value: string): string {
+  const file = secretsFile()
+  if (!file) throw new Error('Cannot locate the DSH home to store the secret')
+  mkdirSync(dirname(file), { recursive: true })
+  const lines = existsSync(file) ? readFileSync(file, 'utf8').split(/\r?\n/) : []
+  const kept = lines.filter(line => {
+    const trimmed = line.trim()
+    if (!trimmed) return false
+    if (trimmed.startsWith('#')) return true
+    const eq = trimmed.indexOf('=')
+    return eq <= 0 || trimmed.slice(0, eq).trim() !== name
+  })
+  kept.push(`${name}=${value}`)
+  writeFileSync(file, `${kept.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+  return file
+}
+
+/**
+ * Resolve the WeCom intelligent bot the long connection subscribes as. The secret is never stored in the settings: the
+ * settings name an environment variable, read here from the environment and then from the local secrets file, and kept
+ * only in the resolved deployment. Every failure names the account field the operator fixes, so the Source stays out
+ * without stopping the rest of the deployment.
+ */
+export function resolveWecomBot(wecom: unknown, lookup: (name: string) => string | undefined = name => process.env[name] ?? readSecret(name)): WecomBot | undefined {
   const { botId, secretVariable } = WecomBotSchema.parse(wecom ?? {})
   if (!botId && !secretVariable) return undefined
   if (!botId) throw new SetupError('wecomBotUnset')
