@@ -144,6 +144,9 @@ describe('wecom source', () => {
     await expect(sendWecom(undefined, one)).rejects.toMatchObject({ code: 45009 })
     setWecomSender(sender(client({ failure: new Error('socket hang up') }), frame({})))
     await expect(sendWecom(undefined, one)).rejects.toThrow('socket hang up')
+    // A push WeCom refuses outright settles the message as gone, so it is never retried in a loop.
+    setWecomSender(sender(client({ failure: new WecomApiError(93000, 'no such conversation') }), undefined))
+    expect(await sendWecom(undefined, outbound({ chatId: GROUP, delivery: 'push' }))).toBe('gone')
     // Without a connection the message waits rather than being dropped.
     setWecomSender(undefined)
     await expect(sendWecom(undefined, one)).rejects.toThrow(/not running/)
@@ -151,11 +154,16 @@ describe('wecom source', () => {
   it('bounds a message to the bytes and words WeCom renders', async () => {
     const connected = client({ rows: [] })
     setWecomSender(sender(connected, frame({})))
-    await sendWecom(undefined, { id: 'i', kind: 'reply', text: 'x'.repeat(300), ticketId: 't',
+    // 100 single-letter words (at the word limit) followed by one unbroken run, so the text passes the word check at 4198
+    // bytes and only the 4096-byte limit applies.
+    const long = `${'x '.repeat(99)}${'x'.repeat(4000)}`
+    await sendWecom(undefined, { id: 'i', kind: 'reply', text: long, ticketId: 't',
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
-    const body = replyOf(connected).mock.calls[0]![1] as { markdown: { content: string } }
+    const body = replyOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    // The panel pointer is what a reader sees in place of the rest, and the whole body still fits what WeCom renders.
+    expect(body.markdown.content.endsWith('…（全文见本地面板）')).toBe(true)
     expect(Buffer.byteLength(body.markdown.content)).toBeLessThanOrEqual(4096)
-    // The 100-word limit is checked too, so a long reply asks for a summary rather than being truncated silently.
+    // The 100-word limit is checked first: a message over it asks for a summary instead of being cut.
     await expect(sendWecom(undefined, { id: 'j', kind: 'reply', text: 'word '.repeat(101), ticketId: 't',
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } }))
       .rejects.toThrow(/maximum is 100/)
