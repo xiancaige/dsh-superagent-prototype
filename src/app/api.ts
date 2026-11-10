@@ -61,6 +61,8 @@ export interface Api {
   'POST tickets/:id/delivery/reconcile': { body: { operationKey: string; result: 'delivered' | 'discarded'; receipt?: string; reason?: string }; response: { state: string } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
+  /** Stores one write-only secret (such as the WeCom bot secret) in the local secrets file and applies it at once. */
+  'PUT source:wecom/secret': { body: { variable: string; secret: string }; response: { saved: true; variable: string; file: string } }
   'GET policy/history': { response: HistoryView }
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }

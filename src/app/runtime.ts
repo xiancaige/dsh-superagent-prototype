@@ -324,7 +324,7 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, cardAction: input => feishuCommands.cardAction(input), menuAction: input => feishuCommands.menuAction(input),
         command: trigger => feishuCommands.receive(trigger), get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, get wecomProblem() { return setup.wecomProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, lifetime: this.lifetime,
         deliveryEnabled: process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1',
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },

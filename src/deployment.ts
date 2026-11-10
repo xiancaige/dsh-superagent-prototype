@@ -1,7 +1,7 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
-import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
@@ -144,8 +144,15 @@ export const FeishuBotSchema = z.object({
   cli: z.string().trim().default(''),
   configDir: z.string().trim().regex(/^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/, 'Absolute configuration directory').optional(),
 })
+/** The WeCom intelligent bot's identity on its long connection; the secret is kept out of the settings and read from the named environment variable. */
+export const WecomBotSchema = z.object({
+  botId: z.string().trim().default(''),
+  secretVariable: z.string().trim().regex(/^(?:[A-Z][A-Z0-9_]*)?$/, 'Environment variable name').default(''),
+  webhook: z.string().trim().regex(/^(?:https:\/\/qyapi\.weixin\.qq\.com\/cgi-bin\/webhook\/send\?key=[A-Za-z0-9-]+)?$/, 'Group webhook URL').default(''),
+})
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape),
+  wecom: Object.keys(WecomBotSchema.shape) }
 
 export interface Deployment extends Machine {
   /** In explicit local mode repository and every github field are empty: no account/remote exists.
@@ -153,8 +160,11 @@ export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
+  wecom?: WecomBot
 }
 export interface FeishuBot { cli: string; configDir?: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** A verified WeCom intelligent bot: the secret is held for the long connection only and is never logged or written into a Trigger. */
+export interface WecomBot { botId: string; secret: string; wsUrl?: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -233,4 +243,69 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, ...(configDir ? { configDir } : {}), appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+}
+
+/**
+ * The local file the panel writes an operator's secret into: `secrets.env` under the DSH home, one `NAME=value` per
+ * line. It exists because the panel offers a secret field, and storing that value in the settings, a log or a Session
+ * would leak it; a file this process reads keeps the setting a variable name only.
+ */
+export const secretsFile = (): string | undefined => {
+  const home = process.env.DSH_HOME || (process.env.USERPROFILE ? join(process.env.USERPROFILE, '.dsh') : undefined)
+  return home ? join(home, 'secrets.env') : undefined
+}
+
+/** Reads `name` from the local secrets file; a missing, unreadable or line-less file yields `undefined`. */
+export function readSecret(name: string): string | undefined {
+  const file = secretsFile()
+  if (!file || !existsSync(file)) return undefined
+  try {
+    for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eq = trimmed.indexOf('=')
+      if (eq <= 0) continue
+      if (trimmed.slice(0, eq).trim() === name) return trimmed.slice(eq + 1).trim()
+    }
+  } catch {
+    // An unreadable file is the same as no file: the caller reports the missing secret.
+  }
+  return undefined
+}
+
+/** Writes `name=value` into the local secrets file, replacing an existing assignment and keeping the file private. */
+export function writeSecret(name: string, value: string): string {
+  const file = secretsFile()
+  if (!file) throw new Error('Cannot locate the DSH home to store the secret')
+  mkdirSync(dirname(file), { recursive: true })
+  const lines = existsSync(file) ? readFileSync(file, 'utf8').split(/\r?\n/) : []
+  const kept = lines.filter(line => {
+    const trimmed = line.trim()
+    if (!trimmed) return false
+    if (trimmed.startsWith('#')) return true
+    const eq = trimmed.indexOf('=')
+    return eq <= 0 || trimmed.slice(0, eq).trim() !== name
+  })
+  kept.push(`${name}=${value}`)
+  writeFileSync(file, `${kept.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+  return file
+}
+
+/**
+ * Resolve the WeCom intelligent bot the long connection subscribes as. The secret is never stored in the settings: the
+ * settings name an environment variable, read here from the environment and then from the local secrets file, and kept
+ * only in the resolved deployment. Every failure names the account field the operator fixes, so the Source stays out
+ * without stopping the rest of the deployment.
+ */
+export function resolveWecomBot(wecom: unknown, lookup: (name: string) => string | undefined = name => process.env[name] ?? readSecret(name)): WecomBot | undefined {
+  const { botId, secretVariable } = WecomBotSchema.parse(wecom ?? {})
+  if (!botId && !secretVariable) return undefined
+  if (!botId) throw new SetupError('wecomBotUnset')
+  if (!secretVariable) throw new SetupError('wecomSecretVariableUnset', { bot: botId })
+  const secret = lookup(secretVariable)?.trim()
+  if (!secret) throw new SetupError('wecomSecretMissing', { variable: secretVariable })
+  const wsUrl = (lookup('DSH_SUPERAGENT_WECOM_WS_URL') ?? '').trim()
+  // A private deployment names its own long-connection address; the public one is the default.
+  if (wsUrl && !/^wss:\/\/[^\s]+$/.test(wsUrl)) throw new SetupError('wecomWsUrlInvalid', { url: wsUrl })
+  return { botId, secret, ...(wsUrl ? { wsUrl } : {}) }
 }

@@ -59,6 +59,13 @@ export const KV = {
     /** A ticket that started outside Feishu, mirrored into a Feishu topic: the topic's root message, by ticket and by message. */
     mirror: family<FeishuMirror, [ticket: string]>('feishu-mirror:'),
     mirrorRoot: family<FeishuMirror, [message: string]>('feishu-mirror-root:') },
+  /**
+   * WeCom intelligent-bot Source: the chats seen (`true` for direct messages); the `req_id` of each message it replies to,
+   * which the long connection keeps for 48 hours and a retried send reuses as its idempotency key; and, per chat, the
+   * message whose conversation later messages are filed under, so one chat topic holds one ticket's follow-ups.
+   */
+  wecom: { chats: record<Record<string, boolean>>('wecom-chats'), reply: family<string, [message: string]>('wecom-reply:'),
+    root: family<string, [chat: string]>('wecom-root:') },
 }
 /** Where a ticket's Feishu topic is: its root message, and the ticket's own Thread that replies in the topic are rewritten to. */
 export interface FeishuMirror { ticketId: string; chatId: string; messageId: string; direct: boolean; thread: { source: string; id: string } }

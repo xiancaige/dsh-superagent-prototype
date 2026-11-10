@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, localDeployment, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, localDeployment, resolveDeployment, resolveFeishuBot, resolveWecomBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -26,6 +26,7 @@ export class Setup {
   private resolved?: Deployment
   problem?: SetupProblem
   feishuProblem?: SetupProblem
+  wecomProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
   private readonly path: string
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
@@ -54,9 +55,9 @@ export class Setup {
       return false
     }
   }
-  /** Trigger a restart to re-run setup, refusing if setup and Feishu are already healthy so running assignments are not interrupted. */
+  /** Trigger a restart to re-run setup, refusing if setup, Feishu and WeCom are already healthy so running assignments are not interrupted. */
   check(): void {
-    if (this.configured() && !this.feishuProblem) throw new UserError('setupComplete')
+    if (this.configured() && !this.feishuProblem && !this.wecomProblem) throw new UserError('setupComplete')
     this.restart()
   }
   /** Defer the restart to the next macrotask so the current HTTP or tool caller receives its response first. */
@@ -66,10 +67,12 @@ export class Setup {
     const { machine } = this.host
     if (machine.executionMode === 'local') {
       if (block === 'source:github') throw new UserError('sourceNotInstalled', { source: 'github' })
-      if (block !== 'source:feishu') return
+      if (block !== 'source:feishu' && block !== 'source:wecom') return
     }
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, (argv, env) => this.probe()(argv, env))
-      : resolveDeployment(machine, settings.sources.github?.config, this.probe())
+    // The WeCom bot needs no CLI probe: its fields are read from the saved settings and the environment, so a save only validates them.
+    const check = block === 'source:wecom' ? Promise.resolve(resolveWecomBot(settings.sources.wecom?.config))
+      : block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, (argv, env) => this.probe()(argv, env))
+        : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -83,17 +86,26 @@ export class Setup {
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
+    // A re-run rereads the WeCom account from what it finds now; a save that fixed it must clear its problem.
+    this.wecomProblem = undefined
     // Lazily construct the worker probe: unconfigured local deployments need no subprocess service.
     const probe: ReturnType<Setup['probe']> = (argv, env) => this.probe()(argv, env)
     const deployment = machine.executionMode === 'local' ? localDeployment(machine)
       : await resolveDeployment(machine, settings.sources.github?.config, probe)
+    // The WeCom account is read from the settings and the environment, never probed by a CLI, and never stops the rest.
+    const wecom = await Promise.resolve().then(() => resolveWecomBot(settings.sources.wecom?.config)).catch((error: unknown) => {
+      if (!(error instanceof SetupError)) throw error
+      this.wecomProblem = error.problem
+      context.logger.warn('dsh-superagent leaves WeCom out: %s', error.message)
+      return undefined
+    })
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
       context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
       return undefined
     })
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(wecom ? { wecom } : {}) }
     if (machine.executionMode === 'local') return resolved
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error

@@ -143,7 +143,9 @@ const TEXT = {
   'problemSetupFix.github': ['在设置 › 来源的 GitHub 卡片修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如登录 CLI），点“重新检查”。', 'Fix it on the GitHub card of the Source settings and save to check again; after a fix outside dsh-superagent, such as signing a CLI in, choose Check again.'],
   'problemSetupFix.feishu': ['在设置 › 来源的飞书卡片修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如配置机器人），点“重新检查”。', 'Fix it on the Feishu card of the Source settings and save to check again; after a fix outside dsh-superagent, such as configuring the bot, choose Check again.'],
   'problemSetupFix.deployment': ['在部署设置里修正后保存，会重新检查；在 dsh-superagent 之外修复的（例如升级 git），点“重新检查”。', 'Fix it in the Deployment settings and save to check again; after a fix outside dsh-superagent, such as upgrading git, choose Check again.'],
+  'problemSetupFix.wecom': ['在设置 › 来源的企业微信卡片修正后保存，会重新检查；密钥环境变量的改动在 dsh-superagent 之外，改完点“重新检查”。', 'Fix it on the WeCom card of the Source settings and save to check again; the secret variable changes outside dsh-superagent, so choose Check again after editing it.'],
   problemSetupFeishu: ['飞书机器人检查未通过，飞书来源暂停', 'Feishu bot check failed; the Feishu Source is paused'],
+  problemSetupWecom: ['企业微信机器人检查未通过，企业微信来源暂停', 'WeCom bot check failed; the WeCom Source is paused'],
   // Source
   labelsAdded: ['列表已更新，新增：{names}', 'List updated, added: {names}'],
   labelsCurrent: ['列表已是最新', 'List is up to date'],
@@ -765,10 +767,16 @@ const TEXT = {
   'setup.feishuBotNotReady': ['应用 {app} 的机器人身份状态是 {status}；用 lark-cli 配置应用密钥。', SETUP_PROBLEMS.feishuBotNotReady[1]],
   'setup.feishuUserIdentity': ['机器人的 lark-cli 允许用户身份（strict mode 为 {mode}）；按 docs/006-deployment.md 给机器人一份 strict mode 为 bot 的单独配置。', SETUP_PROBLEMS.feishuUserIdentity[1]],
   'setup.feishuNoBot': ['飞书机器人接口没有返回机器人的 open_id。', SETUP_PROBLEMS.feishuNoBot[1]],
+  'setup.wecomBotUnset': ['企业微信来源没有填机器人 ID。', SETUP_PROBLEMS.wecomBotUnset[1]],
+  'setup.wecomSecretVariableUnset': ['企业微信来源没有指定存放机器人 {bot} 密钥的环境变量。', SETUP_PROBLEMS.wecomSecretVariableUnset[1]],
+  'setup.wecomSecretMissing': ['环境变量 {variable} 为空，企业微信机器人无法订阅长连接。', SETUP_PROBLEMS.wecomSecretMissing[1]],
+  'setup.wecomWsUrlInvalid': ['长连接地址 {url} 不是 wss:// 地址。', SETUP_PROBLEMS.wecomWsUrlInvalid[1]],
   'healthCode.setupPending': ['等待部署检查', HEALTH_TEXT.setupPending],
   'healthCode.sourceOff': ['已关闭', HEALTH_TEXT.sourceOff],
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
+  'healthCode.wecomBotUnset': ['来源已打开，还没有设置机器人 ID', HEALTH_TEXT.wecomBotUnset],
+  'healthCode.wecomBotMissing': ['等待企业微信机器人', HEALTH_TEXT.wecomBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT
