@@ -15,7 +15,9 @@ import { setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
 
 export type DeploymentForm = ConfigPageForm | undefined
-type Op = Parameters<ConfigPageForm['mutate']>[0][number]
+// The DSH line the plugin is built against differs in how `mutate` reports its operations, so the operation type is read
+// from the form itself rather than restated here.
+type MutateOperations<F> = NonNullable<F> extends { mutate: (ops: infer O, ...rest: never[]) => unknown } ? O : readonly unknown[]
 
 const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs'] as const
 type Limits = Record<typeof MACHINE_LIMITS[number], string>
@@ -38,7 +40,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   const draft = useDraft({ saved: limitsOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
     reload: async () => {},
     save: async (value, revision, base) => {
-      const ops: Op[] = MACHINE_LIMITS.filter(key => value[key].trim() !== base[key].trim())
+      const ops: MutateOperations<ConfigPageForm> = MACHINE_LIMITS.filter(key => value[key].trim() !== base[key].trim())
         .map(key => value[key].trim() ? { op: 'set', path: [key], value: Number(value[key]) } : { op: 'unset', path: [key] })
       if (!form || !await form.mutate(ops, revision)) throw new Error(t('deploymentRefused'))
       notify(t('saved'))

@@ -55,6 +55,11 @@ export interface FeishuCommandsHost {
   sendModelCard?(target: ModelCardTarget, card: object): Promise<void>
 }
 
+/**
+ * TP operator commands of the Feishu Source, run before ordinary intake so they work even when no model has quota.
+ * Only a listed operator in a listened chat may run one, and a receipt keyed by the callback keeps a replayed event from
+ * running it twice. Ordinary requests never reach this class; they keep the usual intake path.
+ */
 export class FeishuCommands {
   private chain: Promise<unknown> = Promise.resolve()
   constructor(private readonly host: FeishuCommandsHost) {}
