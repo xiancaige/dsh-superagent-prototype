@@ -217,10 +217,10 @@ it('rejects unavailable models and invalid targets without saving or selecting',
 it('reads TODO details across blank index gaps, strips checkpoints, rejects traversal and symlinks', async () => {
   const { host, trigger, replies } = fixture(), root = await mkdtemp(join(tmpdir(), 'feishu-commands-'))
   roots.push(root); host.root = root
-  await mkdir(join(root, 'plans', 'todo'), { recursive: true })
-  await writeFile(join(root, 'plans', 'TODO.md'), '| 1 | First | [one](todo/one.md) |\n\n| 2 | Second | [two](todo/two.md) |\n| 3 | Escape | [x](../secret.md) |')
-  await writeFile(join(root, 'plans', 'todo', 'two.md'), '# Second\nDetails\n<!-- walk-checkpoint hidden -->')
-  await writeFile(join(root, 'secret.md'), 'secret')
+  await mkdir(join(root, '.dsh', 'plugins', 'tp-planboard', 'data', 'todo'), { recursive: true })
+  await writeFile(join(root, '.dsh', 'plugins', 'tp-planboard', 'data', 'TODO.md'), '| 1 | First | [one](todo/one.md) |\n\n| 2 | Second | [two](todo/two.md) |\n| 3 | Escape | [x](../secret.md) |')
+  await writeFile(join(root, '.dsh', 'plugins', 'tp-planboard', 'data', 'todo', 'two.md'), '# Second\nDetails\n<!-- walk-checkpoint hidden -->')
+  await writeFile(join(root, '.dsh', 'plugins', 'tp-planboard', 'secret.md'), 'secret') // '../secret.md' from the data dir
   const commands = new FeishuCommands(host)
   await commands.receive(trigger('/todo'))
   expect(replies.at(-1)!.text).toContain('#2 Second')
@@ -228,8 +228,8 @@ it('reads TODO details across blank index gaps, strips checkpoints, rejects trav
   expect(replies.at(-1)!.text).toContain('Details'); expect(replies.at(-1)!.text).not.toContain('hidden')
   await commands.receive(trigger('/todo 3', 'om_three'))
   expect(replies.at(-1)!.text).toContain('越界'); expect(replies.at(-1)!.text).not.toContain('secret')
-  await symlink(join(root, 'secret.md'), join(root, 'plans', 'todo', 'link.md'))
-  await writeFile(join(root, 'plans', 'TODO.md'), '| 4 | Link | [link](todo/link.md) |')
+  await symlink(join(root, '.dsh', 'plugins', 'tp-planboard', 'secret.md'), join(root, '.dsh', 'plugins', 'tp-planboard', 'data', 'todo', 'link.md'))
+  await writeFile(join(root, '.dsh', 'plugins', 'tp-planboard', 'data', 'TODO.md'), '| 4 | Link | [link](todo/link.md) |')
   await commands.receive(trigger('/todo 4', 'om_four'))
   expect(replies.at(-1)!.text).toContain('越界')
 })
