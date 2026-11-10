@@ -166,7 +166,7 @@ export class FeishuCommands {
   private async todo(args: string[]): Promise<string> {
     if (args.length > 1 || args[0] && !/^\d+$/.test(args[0])) return '用法：/todo 或 /todo <编号>'
     if (!this.host.root) throw new Error('未配置项目 sourceRoot，无法读取项目 TODO')
-    const plans = await realpath(resolve(this.host.root, 'plans'))
+    const plans = await realpath(resolve(this.host.root, '.dsh', 'plugins', 'tp-planboard', 'data')) // TODO data is self-contained in the planboard plugin
     const index = await readFile(resolve(plans, 'TODO.md'), 'utf8')
     // The index can have blank gaps; only numbered Markdown rows are entries, not analysis records.
     const rows = [...index.matchAll(/^\|\s*(\d+)\s*\|\s*(.*?)\s*\|[^\n]*?\[[^\]]*\]\(([^)]+)\)/gm)]

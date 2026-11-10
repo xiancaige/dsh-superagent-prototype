@@ -90,7 +90,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
       'leaves that record behind and never deletes it']],
   ['Only work that does not finish in one pass gets a plan/TODO record', 'team/delivery',
     ['only when the work does not finish in one pass: it fails or is blocked', 'create no plan/TODO detail document for it and add no index line'],
-    ['keep the ticket\'s plan/TODO detail document (for example `plans/todo/<name>.md` and its `plans/TODO.md` index line) current']],
+    ['keep the ticket\'s plan/TODO detail document (for example `.dsh/plugins/tp-planboard/data/todo/<name>.md` and its `.dsh/plugins/tp-planboard/data/TODO.md` index line) current']],
   ['Only work that does not finish in one pass gets a plan/TODO record', 'work',
     ['a ticket that finishes in one pass needs no such document']],
   ['A packaging ticket runs the packaged-game CQTest; a source-only ticket runs PIE CQTest', 'team/delivery',
