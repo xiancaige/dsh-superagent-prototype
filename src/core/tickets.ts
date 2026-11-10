@@ -30,6 +30,17 @@ const acceptedFirst = (a: Ticket, b: Ticket): number =>
   a.createdAt.localeCompare(b.createdAt) || (a.assignments[0]?.id ?? '').localeCompare(b.assignments[0]?.id ?? '')
 /** The block a refused environment leaves on a ticket: the prefix {@link blockedForEnvironment} recognizes, whatever refused it. */
 const environmentBlock = (error: unknown): string => `${ENVIRONMENT_BLOCK}${error instanceof Error ? error.message : String(error)}`
+/**
+ * Migrate a record from before `Ticket.environmentBlock`: the block lived in `validation.blocked` and created
+ * `validation: { enabled: true }`, which strict acceptance then read as a requirement nothing could satisfy. Drop the block and,
+ * when that left nothing but the auto-enabled flag (no contract, evidence, visual verdict or running marker), the whole record.
+ */
+function clearLegacyEnvironmentBlock(ticket: Ticket): void {
+  const validation = ticket.validation
+  if (!validation?.blocked?.startsWith(ENVIRONMENT_BLOCK)) return
+  delete validation.blocked
+  if (!validation.contract && !validation.evidence && !validation.visual && !validation.running) delete ticket.validation
+}
 
 /**
  * Manages each ticket's lifecycle: creates the ticket for an accept decision with its Mandate, Subscriptions, and first
@@ -71,7 +82,7 @@ export class Tickets extends EnginePart {
     if (blocked) {
       // The ticket is recorded and waits for the environment, queued by the fact that another ticket holds it: it gets no
       // launch now and no other ticket is displaced for it (see `resumeEnvironmentWaiter`).
-      ticket.validation = { ...ticket.validation, enabled: true, blocked }
+      ticket.environmentBlock = blocked
       this.repo.tickets.save(ticket)
       for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
       this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
@@ -109,8 +120,9 @@ export class Tickets extends EnginePart {
       const latest = latestAssignment(ticket)
       if (!latest || latest.id !== assignmentId || latest.state !== 'pending') return undefined
       const block = environmentBlock(error)
-      if (ticket.validation?.blocked === block) return ticket
-      ticket.validation = { ...ticket.validation, enabled: ticket.validation?.enabled ?? true, blocked: block }
+      if (ticket.environmentBlock === block) return ticket
+      ticket.environmentBlock = block
+      clearLegacyEnvironmentBlock(ticket)
       ticket.updatedAt = this.now()
       this.repo.tickets.save(ticket)
       this.emit('ticket.exclusive', { ticketId, action: 'refused', reason: reason ?? block })
@@ -128,7 +140,8 @@ export class Tickets extends EnginePart {
     return this.repo.atomic(() => {
       const ticket = this.require(ticketId)
       if (!liveTicket(ticket) || !this.blockedForEnvironment(ticket) || !environments.holds(ticketId)) return false
-      delete ticket.validation!.blocked
+      delete ticket.environmentBlock
+      clearLegacyEnvironmentBlock(ticket)
       ticket.updatedAt = this.now()
       this.repo.tickets.save(ticket)
       this.options.executor.start(ticket, latestAssignment(ticket)!)
