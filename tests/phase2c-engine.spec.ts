@@ -38,10 +38,12 @@ describe('phase 2 C in the Engine', () => {
     const second = h.accept('2')
     // The ticket exists, blocked by the holder's name, and got no launch: its worker never sees the environment.
     const ticket = h.repo.tickets.get(second)!
-    expect(ticket.validation?.blocked).toMatch(new RegExp(`TP environment block: TP environment is held by ticket Fix 1 \\(${first}\\)`))
+    expect(ticket.environmentBlock).toMatch(new RegExp(`TP environment block: TP environment is held by ticket Fix 1 \\(${first}\\)`))
     expect(h.launches).toHaveLength(1)
     expect(h.tickets.holds(second)).toBe(false)
     expect(ticket.ended).toBeUndefined()
+    // Queueing for the environment is not a strict-acceptance requirement: it would leave the ticket unable to ever be accepted.
+    expect(ticket.validation).toBeUndefined()
   })
 
   it('keeps holding while the worker waits, fails, and reworks', () => {
@@ -114,3 +116,4 @@ describe('phase 2 C in the Engine', () => {
     expect(h.tickets.holds(next)).toBe(true)
   })
 })
+

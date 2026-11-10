@@ -315,6 +315,12 @@ export interface Ticket {
   /** Trusted host-managed opt-in acceptance; serialized with the ticket across restarts. */
   validation?: import('./validation.ts').StrictValidation
   /**
+   * Why the ticket waits for the TP environment (prefixed {@link ENVIRONMENT_BLOCK}); cleared when it gets the environment.
+   * Deliberately not part of `validation`: queueing for the environment must never switch strict acceptance on, because a
+   * ticket with `validation.enabled` and no contract can never be accepted and would hold the environment forever.
+   */
+  environmentBlock?: string
+  /**
    * The ticket's one TP editor recovery (started because an editor endpoint was unreachable). Kept
    * on the ticket so a restart cannot grant a second attempt; independent of visual acceptance.
    */
@@ -379,8 +385,9 @@ export const ENVIRONMENT_BLOCK = 'TP environment block: '
  * asked for it again and was refused, and nothing but another holder's release can move it. Such a ticket is queued for
  * the environment, so neither a person's wait nor the hold-back of automated inputs may treat it as answered work.
  */
-export function blockedForEnvironment(ticket: Pick<Ticket, 'validation'>): boolean {
-  return !!ticket.validation?.blocked?.startsWith(ENVIRONMENT_BLOCK)
+export function blockedForEnvironment(ticket: Pick<Ticket, 'validation' | 'environmentBlock'>): boolean {
+  // A record written before `environmentBlock` kept the block in `validation.blocked`: still honoured until it is cleared.
+  return !!(ticket.environmentBlock ?? ticket.validation?.blocked)?.startsWith(ENVIRONMENT_BLOCK)
 }
 /**
  * Whether a ticket waits for a person: its latest Assignment reported blocked or failed, and no person's message reached it

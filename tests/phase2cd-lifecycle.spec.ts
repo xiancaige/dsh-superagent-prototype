@@ -51,7 +51,7 @@ describe('phase 2 C/D (a): a holder is never displaced', () => {
     expect(h.tickets.holds(first)).toBe(true)
     // A second ticket accepted now is blocked with the holder's name and never launched.
     const second = h.accept('2')
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.repo.tickets.get(second)!.environmentBlock).toMatch(/held by ticket Fix 1/)
     expect(h.tickets.holds(second)).toBe(false)
     // `settle` already took the first ticket's launch, so the blocked second ticket left none behind.
     expect(h.launches).toHaveLength(0)
@@ -70,7 +70,7 @@ describe('phase 2 C/D (a): a holder is never displaced', () => {
     session.acquire({ kind: 'session', id: 'main-session', label: 'the main Session' })
     const id = h.accept('1')
     const ticket = h.repo.tickets.get(id)!
-    expect(ticket.validation?.blocked).toMatch(/held by session the main Session \(Session pid 300\)/)
+    expect(ticket.environmentBlock).toMatch(/held by session the main Session \(Session pid 300\)/)
     expect(h.launches).toHaveLength(0)
     expect(h.tickets.holds(id)).toBe(false)
     expect(lockOf(state)!.holder).toMatchObject({ kind: 'session', id: 'main-session' })
@@ -103,7 +103,7 @@ describe('phase 2 C/D (b): a confirmed completion gives the environment back', (
     expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second])
     // A ticket accepted now is refused behind the waiter that now holds it.
     const third = h.accept('3')
-    expect(h.repo.tickets.get(third)!.validation?.blocked).toMatch(/held by ticket Fix 2/)
+    expect(h.repo.tickets.get(third)!.environmentBlock).toMatch(/held by ticket Fix 2/)
     expect(lockOf(state)!.holder.id).toBe(second)
   })
 
@@ -153,7 +153,7 @@ describe('phase 2 C/D (c): a failed editor stop never frees the environment', ()
     expect(h.broker.view().lastRelease).toBeUndefined()
     // The next ticket is still refused, with the first one’s name.
     const second = h.accept('2')
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.repo.tickets.get(second)!.environmentBlock).toMatch(/held by ticket Fix 1/)
     expect(h.tickets.holds(second)).toBe(false)
     // The editor can be stopped on a retry: only then is the environment released.
     h.hosts.stopFailure = undefined
@@ -459,13 +459,13 @@ describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts
     h.settle()
     // Accepted while the first ticket holds the environment: recorded, blocked, and never launched.
     const second = h.accept('2')
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.repo.tickets.get(second)!.environmentBlock).toMatch(/held by ticket Fix 1/)
     expect(h.launches).toHaveLength(0)
     expect(h.tickets.holds(second)).toBe(false)
     // The holder completes and releases: the waiting ticket starts on its own, without a person's message.
     h.ready(first)
     await vi.waitFor(() => expect(h.tickets.holds(second)).toBe(true))
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toBeUndefined()
+    expect(h.repo.tickets.get(second)!.environmentBlock).toBeUndefined()
     expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second])
     expect(lockOf(state)!.holder.id).toBe(second)
     expect(h.raised('ticket.exclusive').at(-1)?.data).toMatchObject({ ticketId: second, action: 'acquired' })
@@ -483,14 +483,14 @@ describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts
     h.settle()
     const second = h.accept('2')
     const third = h.accept('3')
-    expect([second, third].map(id => !!h.repo.tickets.get(id)!.validation?.blocked)).toEqual([true, true])
+    expect([second, third].map(id => !!h.repo.tickets.get(id)!.environmentBlock)).toEqual([true, true])
     h.ready(first)
     // Only the oldest waiter takes it; the other keeps waiting rather than failing.
     await vi.waitFor(() => expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second]))
     expect(h.tickets.holds(second)).toBe(true)
     expect(h.tickets.holds(third)).toBe(false)
     // The refused third ticket still names its own blocker: the holder it was refused for, not the ticket that just took it.
-    expect(h.repo.tickets.get(third)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.repo.tickets.get(third)!.environmentBlock).toMatch(/held by ticket Fix 1/)
     // Nothing displaced the oldest waiter for the other one.
     expect(lockOf(state)!.holder.id).toBe(second)
     expect(h.launches).toHaveLength(1)
@@ -502,7 +502,7 @@ describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts
     const first = h.accept('1')
     h.settle()
     const blocked = h.accept('2')
-    expect(h.repo.tickets.get(blocked)!.validation?.blocked).toMatch(/held by ticket Fix 1/)
+    expect(h.repo.tickets.get(blocked)!.environmentBlock).toMatch(/held by ticket Fix 1/)
     // A stop of the holder's ticket that released nothing (the holder is not that ticket) starts no waiter.
     h.engine.stopTicket(first)
     await vi.waitFor(() => expect(h.tickets.holds(blocked)).toBe(true))
@@ -524,13 +524,13 @@ describe('phase 2 C/D (g): a ticket refused the environment at acceptance starts
     // worker failing, because nothing the ticket did was wrong and no person has anything to answer.
     const held = new EnvironmentHeld(lockOf(state)!)
     expect(h.engine.environmentRefused(second, assignment, held)).toBeTruthy()
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toMatch(/^TP environment block: .*held by ticket Fix 1/)
+    expect(h.repo.tickets.get(second)!.environmentBlock).toMatch(/^TP environment block: .*held by ticket Fix 1/)
     // The ticket is queued for the environment, not waiting for a person, so automated input is not held back from it.
     expect(waitsForPerson(h.repo.tickets.get(second)!)).toBe(false)
     // The holder's release starts that same Assignment, and no retry by a person was needed.
     h.ready(first)
     await vi.waitFor(() => expect(h.launches.map(([ticket]) => ticket.id)).toEqual([second]))
     expect(h.launches[0]![1]).toBe(assignment)
-    expect(h.repo.tickets.get(second)!.validation?.blocked).toBeUndefined()
+    expect(h.repo.tickets.get(second)!.environmentBlock).toBeUndefined()
   })
 })
