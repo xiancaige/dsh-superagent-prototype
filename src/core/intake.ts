@@ -31,6 +31,13 @@ export class Intake extends EnginePart {
     const keys = trigger.threads.map(threadKey)
     // Track reached tickets and whether they were reached only via context threads (a ticket's own thread makes `context` false).
     const reached = new Map<string, { ticket: Ticket; context: boolean }>()
+    // A WeCom chat is one thread for every ticket ever raised in it, and the Source has no topic object to split them. The
+    // operator's rule for that Source: a plain message always asks for new work, and only a quote of a tagged reply
+    // (`工单 #<id>`, read into `meta.quotedTicket`) addresses an existing ticket. So a ticket reaches a plain WeCom message
+    // only when the quote names it — otherwise the fan-out would hand it to every ticket in the chat and Eval would call it
+    // already delivered.
+    const quoted = trigger.source === 'wecom' && typeof trigger.meta.quotedTicket === 'string' ? trigger.meta.quotedTicket : ''
+    const addressed = (ticketId: string): boolean => trigger.source !== 'wecom' || (!!quoted && ticketId.toLowerCase().startsWith(quoted))
     for (const ref of trigger.threads) {
       const thread = this.thread(ref)
       if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
@@ -42,6 +49,7 @@ export class Intake extends EnginePart {
         const followed = !!thread.context?.includes(ticketId)
         const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
         if (!ticket || (!liveTicket(ticket) && !resumes)) continue
+        if (!addressed(ticketId)) continue
         reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
       }
       this.repo.threads.save(thread)
