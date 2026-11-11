@@ -48,6 +48,19 @@ export class TicketedEnvironment {
 
   constructor(readonly broker: EnvironmentExclusivity, private readonly environment: TpEnvironment, private readonly host: TicketedEnvironmentHost) {}
 
+  /**
+   * Give the editor back without ending the ticket: stop exactly the editor this deployment started for it, then release.
+   * Unlike a handover there is no scene export (the ticket's own worktree is not shared), and the ticket keeps running.
+   * @throws when the editor could not be stopped; the ticket keeps the lock.
+   */
+  async release(ticketId: string): Promise<void> {
+    const lease = this.lease(ticketId)
+    if (!lease) return
+    await this.stopEditor(ticketId)
+    lease.release('handover', ticketId)
+    this.leases.delete(ticketId)
+  }
+
   /** The resources the lease covers: the TP editor, the port, the project, and this ticket's directory. */
   private resources(directory: string | undefined): EnvironmentLeaseRecord['resources'] {
     return [
@@ -201,6 +214,7 @@ export function environmentPort(host: TicketedEnvironment | undefined): Environm
     },
     holds: (ticketId: string) => host.holds(ticketId),
     handover: (ticketId: string) => host.handover(ticketId),
+    release: (ticketId: string) => host.release(ticketId),
     end: (ticketId: string, ended: { by: 'executor' | 'human'; outcome: string }, acceptancePassed: boolean) => host.end(ticketId, ended, acceptancePassed),
   }
 }

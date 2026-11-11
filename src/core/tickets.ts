@@ -73,7 +73,8 @@ export class Tickets extends EnginePart {
     // editor may be started; a holder that has it keeps this ticket from starting.
     const environments = this.environments()
     let blocked: string | undefined
-    if (environments) {
+    // On-demand environments (a worktree per ticket) take nothing here: only a ticket that asks for the editor takes the lock.
+    if (environments && !this.onDemand()) {
       try { environments.acquire(id, ticket.title) } catch (error) {
         blocked = environmentBlock(error)
       }
@@ -93,7 +94,7 @@ export class Tickets extends EnginePart {
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
     if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
     this.options.executor.start(this.require(id), assignment)
-    if (environments) this.emit('ticket.exclusive', { ticketId: id, action: 'acquired' })
+    if (environments && !this.onDemand()) this.emit('ticket.exclusive', { ticketId: id, action: 'acquired' })
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
   /**
@@ -158,6 +159,8 @@ export class Tickets extends EnginePart {
   resumeEnvironmentWaiter(): string | undefined {
     const environments = this.environments()
     if (!environments) return undefined
+    // Nothing waits for the environment at acceptance when it is taken on demand: the editor step itself reports who holds it.
+    if (this.onDemand()) return undefined
     const waiting = this.repo.tickets.open().filter(ticket => this.blockedForEnvironment(ticket)).sort(acceptedFirst)[0]
     if (!waiting) return undefined
     try {
@@ -481,6 +484,9 @@ export class Tickets extends EnginePart {
     if (outcome === 'completed' && !this.completion(ticket)) {
       throw new Error('TP environment: the ticket has not passed the acceptance this deployment requires, so it is not completed and keeps the environment for rework')
     }
+    // A completion is also the work reaching the remote: uncommitted or unpushed work is not done, and the worker is told why.
+    const unpublished = outcome === 'completed' ? this.options.publication?.(ticket) : undefined
+    if (unpublished) throw new Error(`Completion refused: the ticket's work is not published to the remote. ${unpublished}`)
     const completed = outcome === 'completed'
     // A stop here releases with its own fact; a confirmed completion is released by the host's completion; any
     // other end is the work ending by itself, so the host releases for that fact too (see `endEnvironment`).

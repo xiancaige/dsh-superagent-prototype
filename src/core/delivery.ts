@@ -116,7 +116,8 @@ export class Deliveries extends EnginePart {
     // Every level needs the ticket's exclusive environment: a commit is a change in the ticket's work tree, and a ticket
     // that lost it (a handover, a lost lease) delivers nothing until it has taken it again.
     // Never re-acquire silently here. A person handing the environment over revokes this fact, even if nobody else took it.
-    if (!this.options.environments?.holds(ticket.id)) reasons.push('Delivery: ticket does not hold environment exclusivity; re-acquire before delivery')
+    // A ticket in its own worktree needs no editor lock to commit or push.
+    if (!this.onDemand() && !this.options.environments?.holds(ticket.id)) reasons.push('Delivery: ticket does not hold environment exclusivity; re-acquire before delivery')
     // Commit is independently granted and needs no strict acceptance of its own, but a ticket that does require it must
     // still have it valid; push and release always require it.
     // Review must also protect a non-strict commit, including a revoked approval under an old grant.

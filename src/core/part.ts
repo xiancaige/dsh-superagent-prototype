@@ -22,6 +22,18 @@ export interface EngineOptions {
    * acceptance passed, a person hands it over, or its work ends. Omitted, no ticket holds anything.
    */
   environments?: Environments
+  /**
+   * When the ticket takes `environments`. `accept` (the default, and what a shared source checkout needs) takes it at
+   * acceptance and keeps it to the end. `editor` is for tickets that each work in their own git worktree: nothing is taken at
+   * acceptance, and the lock is taken only when the ticket asks for the editor (`Engine.acquireEditor`, or a strict test run),
+   * so tickets that only change files run in parallel and only the step that needs the editor queues.
+   */
+  environmentMode?: 'accept' | 'editor'
+  /**
+   * Why the ticket's work is not yet published to the remote (uncommitted changes, commits no remote branch holds), or
+   * undefined once it is. A completion is refused while this names a reason; absent, completion needs no publication.
+   */
+  publication?: (ticket: Ticket) => string | undefined
   /** Phase 2 C completion fact: whether the strict acceptance this ticket requires actually passed. */
   acceptance?: AcceptanceFacts
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
@@ -79,6 +91,8 @@ export abstract class EnginePart {
   protected require(ticketId: string): Ticket { const ticket = this.repo.tickets.get(ticketId); if (!ticket) throw new UserError('unknownTicket'); return ticket }
   /** The environment port, when the deployment has one; a ticket holds nothing otherwise. */
   protected environments(): Environments | undefined { return this.options.environments }
+  /** Whether the environment is taken on demand for the editor rather than at acceptance (see `EngineOptions.environmentMode`). */
+  protected onDemand(): boolean { return this.options.environmentMode === 'editor' }
   /**
    * Whether the ticket's own strict acceptance passed. A ticket without strict acceptance is judged by
    * what it recorded, exactly as before; one with it needs the host's own check, never a report.
