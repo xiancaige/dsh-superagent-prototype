@@ -14,7 +14,7 @@ export interface ExecutorToolsHost {
   /** Absent by default; do not advertise an unconfigured delivery target to workers. */
   readonly deliveryEnabled?: boolean
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'> & Partial<Pick<EngineForExecutor,
-    'runTicketTests' | 'recordVisual' | 'deliverTicket'>>
+    'runTicketTests' | 'recordVisual' | 'deliverTicket' | 'acquireEditor' | 'releaseEditor'>>
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly lifetime?: AbortSignal
@@ -40,6 +40,24 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       execute: async (_args, signal) => {
         if (!host.engine.runTicketTests) throw new Error('Strict validation runner unavailable')
         return host.engine.runTicketTests(ticketId, runningAssignment(), combined(signal))
+      },
+    }),
+    tool({
+      name: 'orchestrator_acquire_editor',
+      description: 'Take the exclusive TP editor lock before starting the editor, PIE, CQTest or the TPMcp port; fails naming the holder, so keep working on files and ask later. Not needed to edit, commit or push.',
+      schema: z.object({}).strict(),
+      execute: async () => {
+        if (!host.engine.acquireEditor) throw new Error('Editor lock unavailable')
+        return host.engine.acquireEditor(ticketId)
+      },
+    }),
+    tool({
+      name: 'orchestrator_release_editor',
+      description: 'Give the TP editor lock back when done with the editor, after closing any editor you started yourself; a ticket end releases it too.',
+      schema: z.object({}).strict(),
+      execute: async () => {
+        if (!host.engine.releaseEditor) throw new Error('Editor lock unavailable')
+        return host.engine.releaseEditor(ticketId)
       },
     }),
     tool({

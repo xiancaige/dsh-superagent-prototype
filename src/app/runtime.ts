@@ -53,6 +53,7 @@ import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } from './editor-recovery.ts'
 import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
 import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
+import { unpublishedReason } from './publication.ts'
 import { SimulatedDelivery } from './simulated-delivery.ts'
 import { exclusivityPort, RECOVERY_HOLDER_PREFIX } from './editor-recovery-lease.ts'
 
@@ -278,7 +279,11 @@ export class Runtime extends Service implements SourceHost {
         // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
         ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'
           ? { deliveryTarget: new SimulatedDelivery(join(machine.stateDir, 'delivery-simulation')) } : {},
-        ...environments ? { environments, acceptance: ticket => this.acceptancePassed(ticket) } : {}, emit: event => {
+        ...environments ? { environments, acceptance: ticket => this.acceptancePassed(ticket),
+          ...machine.environmentMode === 'editor' ? { environmentMode: 'editor' as const } : {} } : {},
+        // A ticket in its own worktree is only done once its work reached the remote; off by default.
+        ...machine.requirePublication ? { publication: (ticket: Ticket) => unpublishedReason(ticket.execution?.directory) } : {},
+        emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)

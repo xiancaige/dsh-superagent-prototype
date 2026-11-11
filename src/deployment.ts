@@ -39,6 +39,8 @@ export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   workspaceMode: s.union(['isolated', 'source']).default('isolated').description('Source uses sourceRoot directly, skips prepare, and shares the project checkout. Isolated preserves per-ticket directories.'),
   sourceRoot: absolute('Existing project root for explicit local source workspace mode.').required(false),
+  environmentMode: s.union(['accept', 'editor']).default('accept').description('When a ticket takes the TP environment lock: at acceptance (accept, the shared-checkout behaviour), or only when it asks for the editor (editor, for tickets that each work in their own git worktree).'),
+  requirePublication: s.boolean().default(false).description('A ticket completes only once its worktree is clean and every commit is in a remote branch (submodules included).'),
   environment: EnvironmentConfig.description('TP editor environment this deployment holds exclusively across a ticket; omitted by deployments without an editor.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
@@ -54,6 +56,10 @@ export interface Machine {
   workspaceMode?: 'isolated' | 'source'
   sourceRoot?: string
   stateDir: string
+  /** When a ticket takes the TP environment lock; absent means at acceptance. */
+  environmentMode?: 'accept' | 'editor'
+  /** Whether completion requires the ticket's work to be on the remote. */
+  requirePublication?: boolean
   /**
    * The rollout's TP environment, already validated by the schema; undefined leaves the deployment without
    * one. Present with `recoveryEnabled: false` means the repository switched the environment off, and the
@@ -74,9 +80,10 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { executionMode, stateDir, workspaceMode, sourceRoot, environment, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  const { executionMode, stateDir, workspaceMode, sourceRoot, environment, environmentMode, requirePublication, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
   verifyWorkspace({ executionMode, stateDir, workspaceMode, sourceRoot })
   return { executionMode, stateDir, workspaceMode, ...sourceRoot ? { sourceRoot } : {}, ...environment ? { environment } : {},
+    ...environmentMode === 'editor' ? { environmentMode } : {}, ...requirePublication ? { requirePublication } : {},
     promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
@@ -129,6 +136,8 @@ export function configOf(machine: Machine): DeploymentConfig {
     workspaceMode: machine.workspaceMode === 'source' ? 'source' : 'isolated',
     ...machine.sourceRoot ? { sourceRoot: machine.sourceRoot } : {},
     ...machine.environment ? { environment: machine.environment } : {},
+    environmentMode: machine.environmentMode === 'editor' ? 'editor' : 'accept',
+    requirePublication: machine.requirePublication === true,
     promptMaxChars: machine.promptMaxChars,
     admissionContextMaxPages: machine.admissionContextMaxPages,
     admissionContextTimeoutMs: machine.admissionContextTimeoutMs,

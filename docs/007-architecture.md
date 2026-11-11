@@ -324,7 +324,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/environment-exclusive.ts` | Phase 2 C the TP environment exclusivity: the persisted lease in B2's one lock file (holder, kind, resources, acquisition time, heartbeat), the holder that is never stolen, the three release facts and the handover export |
 | `src/app/simulated-delivery.ts` | Phase 2 D opt-in local simulation receipts only; no real commit/push/PR/upload |
 | `src/core/delivery.ts` | Phase 2 D independent expiring grants, strict acceptance/exclusivity and persistent at-most-once dispatch |
-| `src/app/ticketed-environment.ts` | Phase 2 C the ticket side of the environment: acquisition at acceptance, heartbeats, a person's handover and the release a ticket's end allows, exposed as the Engine's `Environments` port |
+| `src/app/publication.ts` | Completion gate of `requirePublication`: a ticket's worktree (and each initialized submodule) must be clean and its HEAD contained in a remote branch; read-only git, a git failure counts as unpublished |
+| `src/app/ticketed-environment.ts` | Phase 2 C the ticket side of the environment: acquisition at acceptance (or, with `environmentMode: editor`, only when the ticket asks for the editor and gives it back with `release`), heartbeats, a person's handover and the release a ticket's end allows, exposed as the Engine's `Environments` port |
 | `src/app/editor-recovery-lease.ts` | Phase 2 C the recovery's borrow of that one lock: inside its holder's lease when the holder is the ticket, otherwise a borrow that names the holder it found |
 | `src/sources/local.ts` | `Local` source: messages posted through the panel API into a local thread |
 | `src/client/local-compose.tsx` | Panel control that composes a local message |
@@ -454,6 +455,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/phase2cd-lifecycle.spec.ts` | Phase 2 C+D lifecycle: completion release after editor cleanup, failed cleanup keeps the lock, re-acquire before continuing, different-PID broker rules, explicit operator acquire/release |
 | `tests/phase2d-tool.spec.ts` | Phase 2 D opt-in worker request tool, strict schemas, ticket/assignment closure and no worker grants |
 | `tests/phase2d-delivery.spec.ts` | Phase 2 D real unittest/visual/broker evidence, independent grants, denied stale versions/handover and SQLite restart idempotence with simulated targets |
+| `tests/on-demand-environment.spec.ts` | TODO 32: with `environmentMode: editor` accepting takes no lock and every ticket launches; only `acquireEditor` is exclusive, a refused asker keeps running, a failed editor stop keeps the lock, a strict test run takes the editor first; no ticket is told apart by role |
+| `tests/publication.spec.ts` | TODO 32: real git over a bare origin — clean and pushed, uncommitted, unpushed commit, rejected non-fast-forward, git failure, unpushed submodule; and the completion gate that refuses with the reason |
 | `tests/phase2c-engine.spec.ts` | Phase 2 C through the Engine: the environment taken at acceptance, a second ticket refused and not launched, waiting and rework keeping it, a completion the host does not confirm refused, the stop and the self-end releasing it, and a handover that exports first |
 | `tests/local-compose.spec.tsx` | The local message composer |
 | `tests/local-setup.spec.ts` | Local source setup through the panel |

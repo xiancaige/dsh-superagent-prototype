@@ -16,7 +16,7 @@ export const SELF_PID = 100
 
 export interface StopAttempt { ticketId: string; failed: boolean; holdsAtStop: boolean }
 
-export function lifecycleHarness(directory: string) {
+export function lifecycleHarness(directory: string, extra: Partial<EngineOptions> = {}) {
   const repo = new MemoryRepositories()
   const requests: Candidate[] = []
   const assessor: Assessor = { request: candidate => { requests.push(candidate) }, release: () => {} }
@@ -50,7 +50,7 @@ export function lifecycleHarness(directory: string) {
     directory: (ticketId: string) => hosts.directories.get(ticketId),
   })
   const engine = new Engine({ repo, scope: { scope: () => ({ listened: true, observed: false }) }, policy: () => policy, assessor, executor, outbox,
-    environments: environmentPort(tickets)!, acceptance: ticket => hosts.acceptance(ticket), emit: event => { events.push(event) } })
+    environments: environmentPort(tickets)!, acceptance: ticket => hosts.acceptance(ticket), emit: event => { events.push(event) }, ...extra })
   const settle = () => { let next = launches.shift(); while (next) { engine.assignmentStarted(next[0].id, next[1]); next = launches.shift() } }
   const accept = (id: string) => {
     engine.receive(trigger(id)); engine.evaluateDue()

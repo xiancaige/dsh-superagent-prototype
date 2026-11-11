@@ -97,6 +97,8 @@ export interface Environments {
   describe(ticketId: string): TicketHold | undefined
   /** Whether the ticket holds the environment now: the engine's own line of defence beside the host's lock. */
   holds(ticketId: string): boolean
+  /** Give the editor back: stop the editor the ticket started, then release; a failed stop throws and keeps the lock. Optional for hosts without an editor. */
+  release?(ticketId: string): Promise<void>
   /** A person's explicit handover: export the scene, then release, or refuse and keep holding. */
   handover(ticketId: string): Promise<{ handedOver: boolean; export?: string; files: number; error?: string }>
   /** The ticket's work ended; the host releases only for the facts the contract names. */

@@ -260,6 +260,8 @@ export class Engine {
   ensureEnvironment(ticketId: string): void {
     const environments = this.options.environments
     const ticket = this.repo.tickets.get(ticketId)
+    // On-demand environments are not taken to continue: a worker that only changes files never holds the lock.
+    if (this.options.environmentMode === 'editor') return
     if (!environments || !ticket || !liveTicket(ticket) || environments.holds(ticketId)) return
     try { environments.acquire(ticketId, ticket.title) } catch (error) {
       this.raise('ticket.exclusive', { ticketId, action: 'refused', reason: error instanceof Error ? error.message : String(error) })
@@ -314,10 +316,50 @@ export class Engine {
       return { released: false, error: message }
     }
   }
-  /** A host tool for a ticket runs only while the ticket holds the environment. */
+  /** A host tool for a ticket runs only while the ticket holds the environment; an on-demand ticket takes it for the tool (see `acquireEditor`). */
   private requireHolding(ticketId: string): void {
     const environments = this.options.environments
+    if (this.options.environmentMode === 'editor') { this.acquireEditor(ticketId); return }
     if (environments && !environments.holds(ticketId)) throw new UserError('notHolding')
+  }
+  /**
+   * The ticket asks for the editor: with on-demand environments this is the one moment it takes the lock, kept until it gives
+   * the editor back (`releaseEditor`) or ends. Only the editor step waits: a refusal names the holder, and the ticket itself
+   * keeps running. A ticket that holds it already is left alone, and a deployment without a TP environment has no editor to ask for.
+   * @throws UserError when the ticket is unknown or ended; Error naming the holder when another ticket or Session has the editor.
+   */
+  acquireEditor(ticketId: string): { held: boolean } {
+    const environments = this.options.environments
+    const ticket = this.repo.tickets.get(ticketId)
+    if (!ticket) throw new UserError('unknownTicket')
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (!environments) return { held: false }
+    if (environments.holds(ticketId)) return { held: true }
+    try { environments.acquire(ticketId, ticket.title) } catch (error) {
+      this.raise('ticket.exclusive', { ticketId, action: 'refused', reason: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+    this.raise('ticket.exclusive', { ticketId, action: 'acquired' })
+    return { held: true }
+  }
+  /**
+   * The ticket is done with the editor: the editor it started is stopped first (a failed stop keeps the lock), then the lock is
+   * given back, so the next ticket that asked can take it. A ticket that holds nothing has nothing to give back.
+   * @returns whether the lock was released.
+   */
+  async releaseEditor(ticketId: string): Promise<{ released: boolean; error?: string }> {
+    const environments = this.options.environments
+    const ticket = this.repo.tickets.get(ticketId)
+    if (!ticket) throw new UserError('unknownTicket')
+    if (!environments?.release || !environments.holds(ticketId)) return { released: false }
+    try {
+      await environments.release(ticketId)
+      return { released: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.raise('ticket.handover', { ticketId, handedOver: false, error: `The editor release failed: ${message}` })
+      return { released: false, error: message }
+    }
   }
   /** Report a phase 2 C event; the Engine is no EnginePart, so it raises the event itself. */
   private raise<K extends 'ticket.handover' | 'ticket.exclusive'>(type: K, data: DomainEvents[K]): void {
@@ -633,4 +675,4 @@ export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'deferDesignResume' | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply' | 'runTicketTests'
-  | 'recordVisual' | 'deliverTicket' | 'ensureEnvironment' | 'holdsEnvironment' | 'environmentRefused'>
+  | 'recordVisual' | 'deliverTicket' | 'ensureEnvironment' | 'holdsEnvironment' | 'environmentRefused' | 'acquireEditor' | 'releaseEditor'>
