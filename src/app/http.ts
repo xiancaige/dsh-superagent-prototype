@@ -11,7 +11,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
-import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { UserError, ticketAcceptanceProfile, type EngineForPeople, type Ticket } from '../core/index.ts'
 import { DELIVERY_LEVELS } from '../core/delivery.ts'
 import { ReviewConfigurationRequest, ReviewDecisionRequest } from '../core/review.ts'
 import { DesignConfigurationRequest, DesignApprovalRequest } from '../core/design.ts'
@@ -231,7 +231,10 @@ function routes(runtime: HttpHost): Routes {
       const input = DesignApprovalRequest.parse(await body())
       return { designApproval: runtime.engine.approveDesign(ticket(params.id), input).designApproval! }
     },
-    'GET tickets/:id/validation': ({ params }) => ({ validation: store.tickets.get(ticket(params.id))!.validation ?? null }),
+    'GET tickets/:id/validation': ({ params }) => {
+      const found = store.tickets.get(ticket(params.id))!
+      return { validation: found.validation ?? null, acceptance: ticketAcceptanceProfile(found) }
+    },
     'PUT tickets/:id/validation': async ({ params, body }) => {
       const input = z.object({ enabled: z.literal(true), contract: z.object({
         adapter: z.literal('cqtest-report'), executable: z.string().min(1), workspace: z.string().min(1),

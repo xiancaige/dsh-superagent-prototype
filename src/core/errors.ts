@@ -48,6 +48,7 @@ export const USER_ERRORS = {
   noEnvironment: ['refused', 'This deployment has no shared environment a ticket holds; there is nothing to hand over'],
   ticketLive: ['refused', 'This ticket is still running; hand its environment over or stop it instead'],
   notHolding: ['refused', 'This ticket does not hold the shared environment'],
+  adapterNotForRole: ['refused', 'The {adapter} acceptance adapter cannot judge a {role} ticket (allowed for this role: {allowed})'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

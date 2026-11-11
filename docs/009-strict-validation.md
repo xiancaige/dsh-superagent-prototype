@@ -12,6 +12,17 @@ Use the existing loopback management API (`/orchestrator/api`, normal same-origi
 
 Configure only after the workspace exists. Executable and workspace paths must be absolute, real and link-free. The executable must be a trusted validator outside the workspace, not a script supplied by the worker. The worker calls `orchestrator_run_tests` with **no arguments**. Commands, required case IDs and pass/fail counts cannot be supplied through that tool. The adapter is explicitly selected by the trusted contract and is not inferred from text output.
 
+## Acceptance by worker role
+
+The gate is the same for every ticket (design, review, strict evidence); what differs by `workspaceRole` is **which contract adapter may be configured** ([`src/core/acceptance.ts`](<../src/core/acceptance.ts>)). A ticket without `workspaceRole` is `game`.
+
+| Role | Contract adapters | Basis |
+|---|---|---|
+| `game` | `cqtest-report` | Gameplay, assets, project C++/Config: the editor runs and writes a CQTest report. A recorded visual verdict may be added. |
+| `ops` | none yet | Plugins, knowledge, plans, build and CI never start the editor, so a CQTest report can never exist. A trusted command adapter (build/typecheck/tests with the exit code and content fingerprint) is the next step and is **not** implemented. |
+
+`PUT tickets/:id/validation` with a contract the role does not allow is refused with `adapterNotForRole`, naming the adapter and the role, and the ticket is left unchanged. `{ "enabled": true }` without a contract and a worker-recorded visual verdict stay available to both roles. The profile is checked when a contract is configured, not when a ticket ends: a record saved before profiles existed is judged by its stored evidence exactly as before, so no ticket is locked out. `GET tickets/:id/validation` returns the ticket's `acceptance` profile beside `validation`.
+
 ## CQTest adapter (the only adapter)
 
 The project owns running Unreal: a person or worker runs `BuildScripts/run-cqtest` itself (for example `run-cqtest.bat editor <filter> 600`), and that run writes Unreal's own `Saved/Automation/TestReport/index.json`. The host **never launches Unreal** and has no way to pick a filter, a map or a command; `orchestrator_run_tests` only validates the report the run left behind. See `cqtest-validation.ts` for the exact rules.
