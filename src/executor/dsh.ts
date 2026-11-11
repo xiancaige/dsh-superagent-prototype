@@ -35,6 +35,13 @@ const BACKGROUND_LIMIT_MS = 30 * 60_000
 const SHUTDOWN_STOP_MS = 10_000
 /** How long a worker that goes on after a passing failure waits for a worker slot, or for processing to resume, between looks. */
 const SLOT_WAIT_MS = 5000
+/**
+ * How often the watchdog looks for a worker that stopped without saying so, and how long an Assignment may report nothing
+ * before it counts as stopped. A worker killed by the host, by its own crash or by a stop of the process leaves its
+ * Assignment `running` and the TP environment held, and every later ticket then queues behind a worker that is gone.
+ */
+const WATCHDOG_EVERY_MS = 60_000
+const WATCHDOG_STALE_MS = 15 * 60_000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
 const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
 /**
@@ -536,6 +543,9 @@ export class DshExecutor implements Executor {
       const assignment = ticket && runningAssignment(ticket)
       if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent))
     }))
+    // A worker that stops without an `agent/status` change, as a killed process does, would keep its Assignment running and
+    // the TP environment held for good; the watchdog ends that Assignment so the tickets queued behind it can run.
+    this.watchdog()
     // A person's message typed into a worker's Session, which the ticket does not record.
     this.disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       const ticketId = ticketOfSession(agent.id)
@@ -566,6 +576,59 @@ export class DshExecutor implements Executor {
     for (const dispose of this.disposers.splice(0)) dispose()
     for (const timer of this.timers) clearTimeout(timer)
     this.timers.clear()
+  }
+  /**
+   * Ends Assignments whose worker is gone. A worker killed without an `agent/status` change — a crash, an OOM, a stop of
+   * the process that left its record behind — keeps its Assignment `running` and the TP environment held, so every ticket
+   * opened afterwards waits for an environment that nobody will release. Each look ends an Assignment only when its worker
+   * is absent or idle while the Assignment reports nothing new for `WATCHDOG_STALE_MS`, so a slow but live turn is left be.
+   */
+  private watchdog(): void {
+    if (this.host.closing()) return
+    const timer = setTimeout(() => {
+      this.timers.delete(timer)
+      try { this.sweepStale() } finally { this.watchdog() }
+    }, WATCHDOG_EVERY_MS)
+    timer.unref?.()
+    this.timers.add(timer)
+  }
+  /** Ends every running Assignment whose worker no longer runs it; see `watchdog`. */
+  private sweepStale(): void {
+    if (this.host.closing()) return
+    for (const ticket of this.host.store.tickets.open()) {
+      const latest = latestAssignment(ticket)
+      // A ticket the launcher skipped because it read as waiting for an environment whose holder is gone for good: `start`
+      // returns without enqueuing anything while `blockedForEnvironment` reads the stored report, so the ticket would sit
+      // queued for ever. Only a holder that has *ended* is stale — a live one releasing the environment hands it to the
+      // oldest waiter through the normal path, which re-queuing here would jump ahead of.
+      const blockedBy = latest?.state === 'pending' && latest.report?.state === 'blocked'
+        ? /EnvironmentHeld[\s\S]*?held by ticket [^(]*\(([0-9a-f]{6,})\)/.exec(String(latest.report.summary))?.[1]
+        : undefined
+      // The holder is stale only when its ticket has ended: a live holder still hands the environment on through the normal
+      // waiter path, and re-queuing this one here would let it jump ahead of the oldest waiter.
+      const holderEnded = !!blockedBy && !this.host.store.tickets.open().some(other => other.id.startsWith(blockedBy))
+      if (latest && holderEnded && !this.host.engine.holdsEnvironment?.(ticket.id)) {
+        this.host.health.set({ state: 'error', at: now(),
+          detail: `Ticket ${ticket.id} waits for an environment whose holder ended; queued it again` })
+        this.start(ticket, latest)
+        continue
+      }
+      const assignment = runningAssignment(ticket)
+      if (!assignment) continue
+      const agent = this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)
+      // A worker still in a turn is working, not stale, however long its step takes.
+      if (agent?.status === 'running') continue
+      // No Session at all means the worker is gone outright — never launched here, or killed with its record left behind —
+      // so its Assignment ends at once: waiting for the timeout would keep the TP environment held for a worker that cannot
+      // release it. A Session that exists but reports nothing still gets the full timeout, since it may be between steps.
+      const last = assignment.report?.at ?? assignment.startedAt ?? assignment.createdAt
+      const quiet = Date.now() - Date.parse(last)
+      if (agent && (!Number.isFinite(quiet) || quiet < WATCHDOG_STALE_MS)) continue
+      const why = agent ? `stopped without reporting ${Math.round(quiet / 60_000)} minutes ago` : 'has no Session'
+      this.host.health.set({ state: 'error', at: now(), detail: `Worker of ticket ${ticket.id} ${why}; ended its assignment` })
+      this.stopWork(ticket.id, 'worker stopped without reporting', true)
+      this.host.engine.assignmentInterrupted(ticket.id, assignment.id)
+    }
   }
   /**
    * Reconciles running and pending assignments across open tickets after a host restart: notifies Engine of interrupted
