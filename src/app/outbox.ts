@@ -9,6 +9,9 @@ import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Mirror } from './mirror.ts'
 import type { Store } from './store.ts'
 
+/** Where a reply's full text goes when it is too long for the IM; inside the project's git-ignored \.temp\, never a tracked folder. */
+export const REPORT_DIRECTORY = join('.temp', 'superagent-reports')
+
 export interface OutboxHost {
   readonly store: Pick<Store, 'atomic' | 'receipts'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
@@ -45,11 +48,15 @@ export class Outbox implements OutboxPort {
       this.copy(message)
     })
   }
-  /** Writes a reply's full text under the checkout's `AICraft/` and returns the path a person can open; `undefined` on failure. */
+  /**
+   * Writes a reply's full text under the checkout's `.temp/superagent-reports/` and returns the path a person can open;
+   * `undefined` on failure. `.temp` is git-ignored in the project, so a report never shows up as an uncommitted change that
+   * blocks a ticket's completion or lands in a commit. (It used to be `AICraft/`, which git did not ignore.)
+   */
   private writeFullText(ticketId: string | undefined, full: string): string | undefined {
     if (!ticketId) return undefined
     try {
-      const dir = join(process.env.DSH_SUPERAGENT_WORKSPACE || process.cwd(), 'AICraft')
+      const dir = join(process.env.DSH_SUPERAGENT_WORKSPACE || process.cwd(), REPORT_DIRECTORY)
       mkdirSync(dir, { recursive: true })
       const file = join(dir, `ticket-${ticketId.slice(0, 8)}-report.md`)
       writeFileSync(file, `# 工单 ${ticketId}\n\n${full}\n`, 'utf8')
