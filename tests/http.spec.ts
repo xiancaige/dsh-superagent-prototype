@@ -70,7 +70,8 @@ it('configures strict acceptance only through explicit management schema and exp
   expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: otherContract })).toMatchObject({ status: 200 })
   expect(calls.at(-1)).toEqual(['t1', otherContract])
   expect(await call('PUT', 'tickets/t1/validation', { enabled: true, contract: { ...otherContract, args: ['-e', ''] } })).toMatchObject({ status: 400 })
-  expect(await call('GET', 'tickets/t1/validation')).toMatchObject({ status: 200, body: { validation } })
+  // The view names the role's acceptance profile; a ticket without `workspaceRole` is `game`.
+  expect(await call('GET', 'tickets/t1/validation')).toMatchObject({ status: 200, body: { validation, acceptance: { role: 'game', adapters: ['cqtest-report'] } } })
   expect(await call('GET', 'tickets/missing/validation')).toMatchObject({ status: 404 })
   expect(await call('PUT', 'tickets/t1/validation', { enabled: true }, { 'x-orchestrator-request': undefined })).toMatchObject({ status: 403 })
 })

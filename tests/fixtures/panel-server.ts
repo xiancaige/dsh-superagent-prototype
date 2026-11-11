@@ -340,7 +340,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'PUT tickets/:id/review': { body: true, answer: () => refuse(400, 'Host review is not simulated by the panel fixture') },
   'POST tickets/:id/review': { body: true, answer: () => refuse(400, 'Host review is not simulated by the panel fixture') },
   // Strict validation has no panel controls yet; the fixture must not pretend to execute host tests.
-  'GET tickets/:id/validation': { answer: () => ({ validation: null }) },
+  'GET tickets/:id/validation': { answer: () => ({ validation: null, acceptance: { role: 'game' as const, adapters: ['cqtest-report'], visual: true, note: 'fixture' } }) },
   'PUT tickets/:id/validation': { body: true, answer: () => refuse(400, 'Host validation is not simulated by the panel fixture') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
     const ticket = ticketOf(params.id)

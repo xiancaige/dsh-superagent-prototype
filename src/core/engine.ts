@@ -6,6 +6,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import * as nodePath from 'node:path'
 import { createValidationContract, runValidation, type ValidationContractInput } from '../validation.ts'
 import { validationBinding, type VisualFrame } from './validation.ts'
+import { assertAdapterForRole } from './acceptance.ts'
 import { ReviewConfigurationRequest, ReviewDecisionRequest, reviewBinding, type ReviewConfiguration, type ReviewDecisionInput } from './review.ts'
 import { isoTime, liveTicket } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketOutcome, Trigger } from './model.ts'
@@ -428,6 +429,8 @@ export class Engine {
       // A live run's evidence is invalidated by a revision change but not its subprocess; refuse
       // while this host runs tests. The persisted marker stays replaceable only to recover a crash.
       if (this.testRuns.has(ticketId)) throw new Error('Strict validation: a test run is in progress; wait for it before changing the contract')
+      // The adapter must fit the ticket's role: an ops ticket never starts the editor, so a CQTest contract could never be met.
+      if (input) assertAdapterForRole(ticket, input.adapter)
       const contract = input ? createValidationContract({ ...input, revision: randomUUID() }) : undefined
       if (contract && !samePath(ticket.execution?.directory, contract.workspace)) {
         throw new Error('Strict validation: contract workspace must be the ticket workspace')
