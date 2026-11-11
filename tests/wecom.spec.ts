@@ -1,9 +1,10 @@
 /** The WeCom Source: callbacks as Triggers, the receiving scope, the Channel's reply and push, and the bot's account. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { OutboundMessage, Trigger } from '../src/core/index.ts'
+import type { OutboundMessage, Ticket, Trigger } from '../src/core/index.ts'
 import { key } from '../src/core/index.ts'
 import { resolveWecomBot } from '../src/deployment.ts'
 import { KV } from '../src/kv.ts'
@@ -14,11 +15,12 @@ import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import type { SourceHost } from '../src/sources/host.ts'
 import { apply as applyWecom, wecomKind, type WecomConfig } from '../src/sources/wecom.ts'
-import { sendWecom, wecomLink } from '../src/sources/wecom-channel.ts'
+import { sendWecom, setWecomTickets, wecomLink } from '../src/sources/wecom-channel.ts'
 import { setWecomSender, wecomSender, type WecomSender } from '../src/sources/wecom-connection.ts'
 import { runWecom, useWecomClient } from '../src/sources/wecom-loops.ts'
 import { WecomMessageSchema, WecomApiError, type WecomSdkClient, type WecomSdkFrame, type WecomSdkModule } from '../src/sources/wecom-protocol.ts'
 import { wecomTrigger } from '../src/sources/wecom-trigger.ts'
+import { pushWecomGroup, wecomWebhook, WECOM_V2_BYTES } from '../src/sources/wecom-webhook.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -33,14 +35,19 @@ const frame = (body: Record<string, unknown>, reqId = 'req-1'): WecomSdkFrame =>
 const triggerOf = (body: Record<string, unknown>): Trigger => wecomTrigger(WecomMessageSchema.parse(body))!
 /** Store directories a test made, removed when it ends so a run leaves nothing behind. */
 const stores = new Set<{ store: Store; dir: string }>()
+/** Directories of frames a test wrote, removed the same way. */
+const frames = new Set<string>()
 afterEach(() => {
   setWecomSender(undefined)
+  setWecomTickets(undefined)
   for (const { store, dir } of stores) {
     // The Store holds the database open until its test is done; a Windows handle left by it must not fail a passing test.
     try { store.close() } catch { /* Already closed by its test. */ }
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) } catch { /* Removed by the system later. */ }
   }
   stores.clear()
+  for (const dir of frames) { try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) } catch { /* As above. */ } }
+  frames.clear()
 })
 /** A Store whose WeCom Source is on, the kind registered, and a context bound to it. */
 function host(config: Partial<WecomConfig> = {}, overrides: Partial<SourceContextDeps> = {}) {
@@ -61,20 +68,22 @@ function host(config: Partial<WecomConfig> = {}, overrides: Partial<SourceContex
   return { store, sources, board, receive, deps, ctx: sourceContextOf(deps, wecomKind), unregister }
 }
 /** A client whose replies and pushes answer as `answer` says, or reject with `failure` when one is given. */
-function client(overrides: { answer?: WecomSdkFrame | undefined; failure?: unknown; rows?: unknown[][] } = {}): WecomSdkClient {
-  const reply = vi.fn(async (...args: unknown[]) => {
-    overrides.rows?.push(args)
-    if (overrides.failure) throw overrides.failure
-    return overrides.answer ?? { headers: { req_id: 'r' }, errcode: 0 }
-  })
-  const sendMessage = vi.fn(async (...args: unknown[]) => {
-    overrides.rows?.push(args)
-    if (overrides.failure) throw overrides.failure
-    return overrides.answer ?? { headers: { req_id: 'r' }, errcode: 0 }
-  })
-  return { reply, sendMessage, isConnected: true } as unknown as WecomSdkClient
+function client(overrides: { answer?: WecomSdkFrame | undefined; failure?: unknown; rows?: unknown[][]; uploadFailure?: unknown } = {}): WecomSdkClient {
+  const answer = () => overrides.answer ?? { headers: { req_id: 'r' }, errcode: 0 }
+  const record = async <T>(value: T, ...args: unknown[]): Promise<T> => { overrides.rows?.push(args); if (overrides.failure) throw overrides.failure; return value }
+  return {
+    reply: vi.fn(async (...args: unknown[]) => record(answer(), ...args)),
+    sendMessage: vi.fn(async (...args: unknown[]) => record(answer(), ...args)),
+    uploadMedia: vi.fn(async (...args: unknown[]) => { overrides.rows?.push(args); if (overrides.uploadFailure) throw overrides.uploadFailure; return { media_id: 'media-1' } }),
+    replyMedia: vi.fn(async (...args: unknown[]) => record(answer(), ...args)),
+    sendMediaMessage: vi.fn(async (...args: unknown[]) => record(answer(), ...args)),
+    isConnected: true,
+  } as unknown as WecomSdkClient
 }
-const replyOf = (client: WecomSdkClient) => client.reply as unknown as { mock: { calls: unknown[][] } }
+const repliesOf = (client: WecomSdkClient) => client.reply as unknown as { mock: { calls: unknown[][] } }
+const mediaOf = (client: WecomSdkClient) => client.replyMedia as unknown as { mock: { calls: unknown[][] } }
+const pushedMediaOf = (client: WecomSdkClient) => client.sendMediaMessage as unknown as { mock: { calls: unknown[][] } }
+const uploadsOf = (client: WecomSdkClient) => client.uploadMedia as unknown as { mock: { calls: unknown[][] } }
 /** A sender over `client`; `held` is the callback frame it still holds for `MSG1`. */
 const sender = (client: WecomSdkClient, held: WecomSdkFrame | undefined = frame({}), overrides: Partial<WecomSender> = {}): WecomSender =>
   ({ client: () => client, frame: () => held, reqId: () => 'req-stored', openRoot: () => {}, pushTarget: chatId => chatId.replace(/^single:/, ''), ...overrides })
@@ -132,7 +141,7 @@ describe('wecom source', () => {
     setWecomSender(sender(connected, frame({}, 'req-1'), { openRoot }))
     expect(await sendWecom(undefined, outbound({ chatId: GROUP, messageId: 'MSG1', delivery: 'respond' }))).toBe('sent')
     // The stored req_id, not the frame's, so a retried reply answers the same callback rather than posting twice.
-    expect(replyOf(connected).mock.calls[0]).toEqual([expect.objectContaining({ headers: expect.objectContaining({ req_id: 'req-stored' }) }),
+    expect(repliesOf(connected).mock.calls[0]).toEqual([expect.objectContaining({ headers: expect.objectContaining({ req_id: 'req-stored' }) }),
       { msgtype: 'markdown', markdown: { content: expect.stringContaining('工单 #') } }])
     // An expired window (846608) falls back to the chat's push, which needs no callback.
     const openRootPushed = vi.fn()
@@ -167,7 +176,7 @@ describe('wecom source', () => {
     const long = `${'x '.repeat(99)}${'x'.repeat(4000)}`
     await sendWecom(undefined, { id: 'i', kind: 'reply', text: long, ticketId: 't',
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
-    const body = replyOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    const body = repliesOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
     expect(body.markdown.content.endsWith('…（全文见本地面板）')).toBe(true)
     expect(Buffer.byteLength(body.markdown.content)).toBeLessThanOrEqual(4096)
   })
@@ -176,7 +185,7 @@ describe('wecom source', () => {
     setWecomSender(sender(connected, frame({})))
     await sendWecom(undefined, { id: 'k', kind: 'reply', text: 'Done.', ticketId: 'abcdef1234567890',
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
-    const body = replyOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    const body = repliesOf(connected).mock.calls.at(-1)![1] as { markdown: { content: string } }
     // The tag rides in the text, which is the only field WeCom returns for a quote.
     expect(body.markdown.content).toContain('工单 #abcdef12')
     // A reply with no ticket carries no tag at all.
@@ -184,8 +193,89 @@ describe('wecom source', () => {
     setWecomSender(sender(untagged, frame({})))
     await sendWecom(undefined, { id: 'l', kind: 'reply', text: 'Hello.', ticketId: undefined,
       channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'M', delivery: 'respond' } } })
-    const plain = replyOf(untagged).mock.calls.at(-1)![1] as { markdown: { content: string } }
+    const plain = repliesOf(untagged).mock.calls.at(-1)![1] as { markdown: { content: string } }
     expect(plain.markdown.content).not.toContain('工单 #')
+  })
+  it('sends a ticket\'s recorded screenshots after its reply, and skips a frame whose bytes changed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-frames-'))
+    frames.add(dir)
+    const judged = join(dir, 'widget.png')
+    const changed = join(dir, 'changed.png')
+    const notImage = join(dir, 'notes.txt')
+    writeFileSync(judged, Buffer.from('png-bytes'))
+    writeFileSync(changed, Buffer.from('tampered'))
+    writeFileSync(notImage, 'text')
+    const hash = (bytes: string) => createHash('sha256').update(Buffer.from(bytes)).digest('hex')
+    const ticket = { id: 't1', validation: { enabled: true, visual: { verdict: 'passed' as const, frames: [
+      { path: changed, sha256: hash('png-bytes') }, { path: judged, sha256: hash('png-bytes') }, { path: notImage, sha256: hash('text') }] } } } as unknown as Ticket
+    setWecomTickets({ ticket: () => ticket })
+    const connected = client({ rows: [] })
+    setWecomSender(sender(connected, frame({}, 'req-9')))
+    await sendWecom(undefined, { id: 'r1', kind: 'reply', text: 'Done.', ticketId: 't1',
+      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'MSG1', delivery: 'respond' } } })
+    // Only the frame still matching the hash the Engine verified is uploaded; the text file is not a picture.
+    expect(uploadsOf(connected).mock.calls).toHaveLength(1)
+    expect(uploadsOf(connected).mock.calls[0]![1]).toMatchObject({ type: 'image', filename: 'widget.png' })
+    expect(mediaOf(connected).mock.calls[0]![1]).toBe('image')
+    expect(mediaOf(connected).mock.calls[0]![2]).toBe('media-1')
+    setWecomTickets(undefined)
+  })
+  it('pushes a ticket\'s screenshots to the chat when its reply answers no callback', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-frames-'))
+    frames.add(dir)
+    const judged = join(dir, 'shot.png')
+    writeFileSync(judged, Buffer.from('shot'))
+    const hash = createHash('sha256').update(Buffer.from('shot')).digest('hex')
+    setWecomTickets({ ticket: () => ({ id: 't2', validation: { enabled: true, visual: { verdict: 'passed' as const,
+      frames: [{ path: judged, sha256: hash }] } } }) as unknown as Ticket })
+    const connected = client({ rows: [] })
+    setWecomSender(sender(connected, undefined))
+    await sendWecom(undefined, { id: 'r2', kind: 'reply', text: 'Done.', ticketId: 't2',
+      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'MSG2', delivery: 'push' } } })
+    expect(pushedMediaOf(connected).mock.calls[0]![0]).toBe(GROUP)
+    expect(mediaOf(connected).mock.calls).toHaveLength(0)
+    setWecomTickets(undefined)
+  })
+  it('still sends the reply when a screenshot cannot be uploaded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-frames-'))
+    frames.add(dir)
+    const judged = join(dir, 'shot.png')
+    writeFileSync(judged, Buffer.from('shot'))
+    const hash = createHash('sha256').update(Buffer.from('shot')).digest('hex')
+    setWecomTickets({ ticket: () => ({ id: 't3', validation: { enabled: true, visual: { verdict: 'passed' as const,
+      frames: [{ path: judged, sha256: hash }] } } }) as unknown as Ticket })
+    const connected = client({ rows: [], uploadFailure: new Error('upload refused') })
+    setWecomSender(sender(connected, frame({})))
+    expect(await sendWecom(undefined, { id: 'r3', kind: 'reply', text: 'Done.', ticketId: 't3',
+      channel: { source: 'wecom', thread: 'wecom:x', address: { chatId: GROUP, messageId: 'MSG3', delivery: 'respond' } } })).toBe('sent')
+    expect(mediaOf(connected).mock.calls).toHaveLength(0)
+    setWecomTickets(undefined)
+  })
+  it('pushes markdown_v2 to the group bot, clipping what it cannot render and reporting a lost webhook', async () => {
+    const sent: { body: string }[] = []
+    let answer: unknown = { errcode: 0 }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
+      sent.push({ body: init.body })
+      return { ok: true, json: async () => answer } as unknown as Response
+    }))
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc'
+    expect(wecomWebhook({ webhook: url })).toBe(url)
+    expect(wecomWebhook({})).toBeUndefined()
+    expect(await pushWecomGroup(url, '| a | b |\n| - | - |')).toBe('sent')
+    // The message is markdown_v2, the only WeCom format that renders a table.
+    expect(JSON.parse(sent[0]!.body)).toEqual({ msgtype: 'markdown_v2', markdown_v2: { content: '| a | b |\n| - | - |' } })
+    // A body over the 4096 bytes WeCom renders is clipped here rather than refused by the platform.
+    await pushWecomGroup(url, 'x'.repeat(5000))
+    const clipped = JSON.parse(sent[1]!.body).markdown_v2.content as string
+    expect(Buffer.byteLength(clipped)).toBeLessThanOrEqual(WECOM_V2_BYTES)
+    expect(clipped.endsWith('…')).toBe(true)
+    // A gone group or stale webhook is reported as lost, so the caller stops retrying it.
+    answer = { errcode: 93000, errmsg: 'invalid webhook url' }
+    expect(await pushWecomGroup(url, 'hi')).toBe('lost')
+    // Any other refusal may pass on a retry, so it throws.
+    answer = { errcode: 45009, errmsg: 'api freq out of limit' }
+    await expect(pushWecomGroup(url, 'hi')).rejects.toThrow(/freq out of limit/)
+    vi.unstubAllGlobals()
   })
   it('links a chat through the WeCom scheme and names the Trigger of its message', () => {
     expect(wecomLink({ chatId: `single:${MEMBER}`, messageId: 'M1' })).toEqual({ url: `wxwork://message?chatid=${MEMBER}`,

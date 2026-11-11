@@ -1,6 +1,8 @@
 /** The WeCom Channel: answers the callback a message came from, falls back to the chat's push, and builds chat links. */
-import type { OutboundMessage } from '../core/index.ts'
+import type { OutboundMessage, Ticket } from '../core/index.ts'
 import { wecomSender } from './wecom-connection.ts'
+import { sendWecomImages } from './wecom-media.ts'
+import { pushWecomGroup } from './wecom-webhook.ts'
 import { WecomApiError, WECOM_COMMANDS, wecomAck, type WecomSdkFrame } from './wecom-protocol.ts'
 import { wecomTriggerId } from './wecom-trigger.ts'
 import type { ChannelLink } from './kind.ts'
@@ -46,10 +48,23 @@ export function wecomTicketMarkdown(text: string, ticketId: string | undefined):
   return tag ? `${text}\n\n> ${tag}` : text
 }
 
+/** The ticket a message belongs to, as the Channel needs it: the Engine's record, read through the running host. */
+export interface WecomTicketSource {
+  ticket(id: string): Ticket | undefined
+  /** The group webhook the settings name, if any; absent when the Source has no notification outlet. */
+  webhook?(): string | undefined
+}
+/** Set by the plugin entry while it runs, so the Channel can attach a ticket's own screenshots to its replies. */
+let tickets: WecomTicketSource | undefined
+/** Publishes the tickets the Channel reads screenshots from; disposal withdraws it. */
+export const setWecomTickets = (source: WecomTicketSource | undefined): void => { tickets = source }
+
 /**
  * Posts one message to its chat. A reply goes through the callback's `req_id` while the connection holds it (WeCom keeps one
  * for 48 hours); after that window, and for a message meant for a chat rather than an answer, it goes through the chat's
  * push, which needs no callback. `message.id` names one reply, so a retried send reuses its `req_id` instead of posting twice.
+ * A message of a ticket is followed by that ticket's recorded screenshots, because WeCom carries text or one picture at a
+ * time and never both.
  * @returns `gone` when the chat can never accept the message, such as a push WeCom refuses outright.
  * @throws when delivery failed but may succeed on a later retry.
  */
@@ -63,6 +78,19 @@ export async function sendWecom(_host: unknown, message: OutboundMessage): Promi
   // The reply is markdown text carrying `> 工单 #<id>`, which is what a person's quote returns; a template card was
   // tried and refused by this bot, and text keeps the tag in the one field WeCom gives back for a quote.
   const content = markdown(wecomTicketMarkdown(message.text, message.ticketId))
+  const result = await post(sender, message, chatId, messageId, frame, content)
+  if (result !== 'sent') return result
+  // The ticket's screenshots follow its text; a picture that fails never fails the reply beside it.
+  if (message.ticketId && tickets) await sendWecomImages(tickets.ticket(message.ticketId), { chatId, messageId, respond: !!frame })
+  // A reply that is not an answer to a callback is also pushed to the group bot, whose `markdown_v2` keeps tables and lists
+  // the chat cannot render; a lost webhook is dropped rather than retried against a group that no longer exists.
+  if (!frame && message.kind !== 'acknowledgement' && tickets?.webhook?.()) {
+    await pushWecomGroup(tickets.webhook()!, content).catch(() => 'lost')
+  }
+  return result
+}/** Delivers the text itself, through the callback while it is held and through the chat's push otherwise. */
+async function post(sender: NonNullable<ReturnType<typeof wecomSender>>, message: OutboundMessage, chatId: string, messageId: string | undefined,
+  frame: WecomSdkFrame | undefined, content: string): Promise<'sent' | 'gone'> {
   if (frame) {
     const client = sender.client()
     if (client) {

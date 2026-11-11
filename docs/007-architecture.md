@@ -404,7 +404,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/wecom.ts` | The WeCom kind and plugin entry, exported as `./wecom-watch`: the chats, the Policy, the Channel and the long connection |
 | `src/sources/wecom-trigger.ts` | WeCom callbacks as Triggers, and the chat, topic and reply addresses they use |
 | `src/sources/wecom-loops.ts` | The WeCom long connection: subscribe, reconnect, callback intake, and the reply window of each message |
-| `src/sources/wecom-channel.ts` | The WeCom Channel: a reply through the callback's `req_id`, its push fallback, and chat links |
+| `src/sources/wecom-channel.ts` | The WeCom Channel: a reply through the callback's `req_id`, its push fallback, chat links, and the screenshots and group notice that follow a ticket's reply |
+| `src/sources/wecom-media.ts` | The WeCom image Channel: a ticket's visual-acceptance frames, re-hashed before upload, sent through the callback or the chat's push |
+| `src/sources/wecom-webhook.ts` | The WeCom group bot's `markdown_v2` push, the only WeCom format with tables and lists, used as the notification outlet |
 | `src/sources/wecom-protocol.ts` | The WeCom protocol: the long connection's commands, the callback schemas, and the official client's surface |
 | `src/sources/wecom-connection.ts` | The running WeCom connection the kind's Channel replies through |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |

@@ -2,8 +2,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { WecomBotSchema } from '../deployment.ts'
-import { sendWecom, wecomLink } from './wecom-channel.ts'
+import { sendWecom, setWecomTickets, wecomLink } from './wecom-channel.ts'
 import { runWecom } from './wecom-loops.ts'
+import { wecomWebhook } from './wecom-webhook.ts'
 import { sourceContext } from './host.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -44,8 +45,7 @@ export const wecomKind: SourceKind<WecomConfig> = {
       hint: { zh: '机器人已加入、但没列在上面的群。“仅 @”接收那里 @ 机器人的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the bot has joined that are not listed above. "@ only" receives messages there that mention the bot; whose messages may originate work is the Policy\'s admission.' } },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
     { key: 'webhook', type: 'text', advanced: true, label: { zh: '群里推送用的群机器人', en: 'Group webhook for notifications' },
-      hint: { zh: '可选。群机器人只能往群里发消息、不能收消息，所以它不作为来源，只用于主动通知：本来源发出的提醒和会话结束通知会同时发到这个群。留空则不发。', en: 'Optional. A group webhook can only post into a group and never receives, so it is not a Source but a notification outlet: reminders and end notices of this Source also go to it. Left empty, none are sent.' } },
-  ],
+      hint: { zh: '可选。群机器人只能往群里发消息、不能收消息，所以它不作为来源，只用于主动通知：本来源发出的提醒和会话结束通知会同时发到这个群。留空则不发。', en: 'Optional. A group webhook can only post into a group and never receives, so it is not a Source but a notification outlet: reminders and end notices of this Source also go to it. Left empty, none are sent.' } },  ],
   health: ['wecom'],
   scope({ meta }, config) {
     const chatId = String(meta.chatId ?? '')
@@ -122,8 +122,12 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(wecomKind), 'wecom: source kind')
   ctx.effect(() => {
     const controller = new AbortController()
-    const running = runWecom(sourceContext(ctx.orchestrator, wecomKind), controller.signal)
+    const context = sourceContext(ctx.orchestrator, wecomKind)
+    // The Channel attaches a ticket's own screenshots to its replies, so it reads the tickets this Source's context sees,
+    // and the group webhook the settings name as its notification outlet.
+    setWecomTickets({ ticket: id => context.tickets.get(id), webhook: () => wecomWebhook(context.config<Record<string, unknown>>(SOURCE)) })
+    const running = runWecom(context, controller.signal)
       .catch((error: unknown) => { ctx.logger.warn('dsh-superagent WeCom stopped: %s', String(error)) })
-    return async () => { controller.abort(); await running }
+    return async () => { controller.abort(); setWecomTickets(undefined); await running }
   })
 }

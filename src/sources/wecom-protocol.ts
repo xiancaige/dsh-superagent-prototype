@@ -48,8 +48,16 @@ export type WecomSdkClient = {
   reply(frame: WecomFrame, body: Record<string, unknown>): Promise<WecomFrame>
   /** Posts to a chat without a callback; WeCom accepts it for a chat whose bot was written to before. */
   sendMessage(chatid: string, body: Parameters<WecomOfficialClient['sendMessage']>[1]): Promise<WecomFrame>
+  /** Uploads a media file in the chunks the long connection carries, and returns its `media_id`, valid three days. */
+  uploadMedia(file: Buffer, options: { type: WecomMediaType; filename: string }): Promise<{ media_id: string }>
+  /** Attaches an uploaded image to a callback's answer, which is the only way a message carries a picture. */
+  replyMedia(frame: WecomFrame, mediaType: WecomMediaType, mediaId: string): Promise<WecomFrame>
+  /** Sends an uploaded image to a chat without a callback, for a chat whose bot was written to before. */
+  sendMediaMessage(chatid: string, mediaType: WecomMediaType, mediaId: string): Promise<WecomFrame>
   readonly isConnected: boolean
 }
+/** The media kinds WeCom accepts; dsh-superagent sends images, the pictures a ticket's own screenshots give it. */
+export type WecomMediaType = 'image' | 'file' | 'voice' | 'video'
 /** A frame the server pushes or the client answers with; `headers.req_id` is what a reply addresses. */
 export type WecomFrame = Awaited<ReturnType<WecomOfficialClient['reply']>>
 /** A frame this Source typed itself, kept as an alias for the SDK's frame. */
