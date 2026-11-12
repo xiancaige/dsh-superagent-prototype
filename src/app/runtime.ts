@@ -276,6 +276,7 @@ export class Runtime extends Service implements SourceHost {
       const environments = environmentPort(this.environmentHosted?.tickets)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        workspaceBusy: ticketId => executor.workspaceBusy(ticketId),
         // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
         ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'
           ? { deliveryTarget: new SimulatedDelivery(join(machine.stateDir, 'delivery-simulation')) } : {},
@@ -316,7 +317,7 @@ export class Runtime extends Service implements SourceHost {
             const { ticketId, by, outcome, reason } = event.data
             const command = store.settings().executor.finalize.trim()
             if (outcome === 'completed' && command && machine.workspaceMode !== 'source') {
-              effects.enqueue('finalize', ticketId, { ticketId, endedAt: event.at, command })
+              effects.enqueue('finalize', ticketId, { ticketId, endedAt: store.tickets.get(ticketId)!.ended!.at, command })
             }
             effects.enqueue('ticketAnalysis', ticketId, { ticketId, sessionId: workerSessionId(ticketId), by, outcome,
               ...reason ? { reason } : {}, at: event.at })

@@ -247,6 +247,9 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Held across the complete external finalizer lifetime, including process teardown. */
+  private readonly finalizing = new Set<string>()
+  workspaceBusy(ticketId: string): boolean { return this.finalizing.has(ticketId) }
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -268,9 +271,14 @@ export class DshExecutor implements Executor {
       const directory = ticket.execution?.directory
       if (!directory) throw new Error('No ticket workspace to finalize')
       const env = Object.fromEntries(host.environment(ticket).map(variable => [variable.key, variable.value]))
-      await runAsWorker(host.context.subprocess,
-        process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
-        dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
+      // No await between validating the completion and acquiring the lifecycle lease.
+      // Tickets.wake retains human inputs while leased; launch/delivery also wait on the durable effect.
+      this.finalizing.add(ticketId)
+      try {
+        await runAsWorker(host.context.subprocess,
+          process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
+          dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
+      } finally { this.finalizing.delete(ticketId) }
     }, { limit: () => host.paused() ? 0 : 1, retry: [5000, 300_000] })
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text), and the worker the decision named. */

@@ -49,6 +49,52 @@ it('queues opted-in finalization only after completion and waits for the worker 
   expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(false)
 })
 
+it('keeps a human follow-up queued until the running finalizer releases the workspace lease', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
+  const one = await h.acceptedTicket(feishu('lease', '@bot 修一'))
+  const gate = deferred()
+  const spawn = h.subprocess.spawn.getMockImplementation()!
+  h.subprocess.spawn.mockImplementation(spec => {
+    const child = spawn(spec)
+    if (spec.argv.includes('echo finalize-ticket')) return { ...child, done: gate.promise.then(() => child.done) }
+    return child
+  })
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
+  idle(one.sessionId)
+  await waitUntil(() => h.runtime.executor.workspaceBusy(one.ticket.id))
+  h.runtime.receive(feishu('lease-followup', '继续修复', { root_id: 'om_lease', mentions: [] }))
+  await h.runtime.pump()
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.ended?.outcome).toBe('completed')
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.undelivered.length).toBeGreaterThan(0)
+  gate.resolve()
+  await h.runtime.idle()
+  await h.runtime.pump()
+  await h.runtime.idle()
+  expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(false)
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.ended).toBeUndefined()
+})
+
+it('releases a failed finalizer lease while retaining the durable retry', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
+  const one = await h.acceptedTicket(feishu('lease-failure', '@bot 修一'))
+  const spawn = h.subprocess.spawn.getMockImplementation()!
+  h.subprocess.spawn.mockImplementation(spec => {
+    const child = spawn(spec)
+    if (spec.argv.includes('echo finalize-ticket')) return { ...child, done: child.done.then(result => ({ ...result, exitCode: 1 })) }
+    return child
+  })
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
+  idle(one.sessionId)
+  await h.runtime.idle()
+  expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(false)
+  expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(true)
+  h.runtime.receive(feishu('failure-followup', '继续修复', { root_id: 'om_lease-failure', mentions: [] }))
+  await h.runtime.pump()
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.ended).toBeUndefined()
+})
+
 it('does not finalize a dropped ticket even with an opted-in command', async () => {
   const settings = h.runtime.store.settings()
   h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })

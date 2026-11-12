@@ -34,6 +34,8 @@ export interface EngineOptions {
    * undefined once it is. A completion is refused while this names a reason; absent, completion needs no publication.
    */
   publication?: (ticket: Ticket) => string | undefined
+  /** A host-owned workspace operation is running; leave incoming messages queued until it finishes. */
+  workspaceBusy?: (ticketId: string) => boolean
   /** Phase 2 C completion fact: whether the strict acceptance this ticket requires actually passed. */
   acceptance?: AcceptanceFacts
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
