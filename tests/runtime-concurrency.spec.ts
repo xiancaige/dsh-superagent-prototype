@@ -95,6 +95,34 @@ it('releases a failed finalizer lease while retaining the durable retry', async 
   expect(h.runtime.store.tickets.get(one.ticket.id)?.ended).toBeUndefined()
 })
 
+it('holds shutdown and its workspace lease until the aborted finalizer process has exited', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
+  const one = await h.acceptedTicket(feishu('lease-shutdown', '@bot 修一'))
+  const exit = deferred(), aborted = deferred()
+  const spawn = h.subprocess.spawn.getMockImplementation()!
+  h.subprocess.spawn.mockImplementation(spec => {
+    const child = spawn(spec)
+    if (!spec.argv.includes('echo finalize-ticket')) return child
+    const signal = (spec as unknown as { signal: AbortSignal }).signal
+    signal.addEventListener('abort', () => aborted.resolve(), { once: true })
+    return { ...child, done: exit.promise.then(() => ({ exitCode: 1, signal: null })) }
+  })
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
+  idle(one.sessionId)
+  await waitUntil(() => h.runtime.executor.workspaceBusy(one.ticket.id))
+  let stopped = false
+  const stopping = h.stop().then(() => { stopped = true })
+  await aborted.promise
+  expect(stopped).toBe(false)
+  expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(true)
+  expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(true)
+  exit.resolve()
+  await stopping
+  expect(stopped).toBe(true)
+  expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(false)
+})
+
 it('does not finalize a dropped ticket even with an opted-in command', async () => {
   const settings = h.runtime.store.settings()
   h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
