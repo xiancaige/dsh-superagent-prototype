@@ -393,6 +393,12 @@ export class Tickets extends EnginePart {
     const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
     if (first?.kind !== 'trigger') return
     const at = this.now()
+    // Also retain results of tickets completed before result receipts were introduced.
+    const previous = latestAssignment(ticket)
+    const outcome = ticket.ended!.outcome
+    if (previous && (outcome === 'completed' || outcome === 'merged' || outcome === 'dropped')) {
+      ticket.result = { assignmentId: previous.id, outcome, at: ticket.ended!.at }
+    }
     delete ticket.ended; ticket.updatedAt = at
     const assignment = this.newAssignment(ticket)
     // Prepend the resumed marker so it is delivered ahead of the waiting messages.
@@ -501,6 +507,10 @@ export class Tickets extends EnginePart {
       && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
     // An end dated earlier, such as a PR's merge, does not move the ticket's last change back.
     ticket.ended = { at, by, outcome, ...why }; ticket.undelivered = []; ticket.updatedAt = this.now()
+    const resultAssignment = latestAssignment(ticket)
+    if (resultAssignment && (outcome === 'completed' || outcome === 'merged' || outcome === 'dropped')) {
+      ticket.result = { assignmentId: resultAssignment.id, outcome, at }
+    }
     delete ticket.attention; delete ticket.delivery
     // The Assignments the end stops end with it; the ticket's end says why.
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }

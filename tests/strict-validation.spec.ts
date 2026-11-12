@@ -102,6 +102,28 @@ describe('strict validation at Engine acceptance boundaries', () => {
     expect(() => failed.ready(failedId)).toThrow(/validation/i)
   })
 
+  it('preserves a delayed completed notification across resumption and SQLite restore without approving new work', async () => {
+    const database = join(workspace(), 'resumed.sqlite'), store = openStore(database)
+    const h = harness(store), id = h.accept()
+    h.enable(id)
+    expect((await h.run(id)).passed).toBe(true)
+    h.ready(id)
+    const finishedAssignment = h.current(id).assignments.at(-1)!.id
+    h.engine.receive({ id: 'follow-up', source: 'chat', threads: [{ source: 'chat', id: 'request-1' }],
+      actor: { source: 'chat', id: 'alice' }, human: true, at: '2026-11-02T01:00:00.000Z', text: 'Status?', meta: {},
+      channel: { source: 'chat', thread: 'request-1', address: { message: 'follow-up' } } })
+    const resumedAssignment = h.current(id).assignments.at(-1)!.id
+    expect(resumedAssignment).not.toBe(finishedAssignment)
+    h.engine.assignmentStarted(id, resumedAssignment)
+    closeStore(store)
+    const restored = harness(openStore(database), h.directory)
+    expect(restored.current(id).result).toMatchObject({ assignmentId: finishedAssignment, outcome: 'completed' })
+    expect(restored.result(id).status).toBe('pending')
+    expect(() => restored.ready(id)).toThrow(/validation|assignment/i)
+    writeFileSync(join(h.directory, 'source.ts'), 'export const answer = () => 0\n')
+    expect(() => restored.result(id)).toThrow(/validation|stale|changed/i)
+  })
+
   it('keeps legacy tickets without validation backward compatible, including after SQLite restore', () => {
     const path = join(workspace(), 'legacy.sqlite')
     const store = openStore(path)

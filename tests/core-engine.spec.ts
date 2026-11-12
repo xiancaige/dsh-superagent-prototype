@@ -1297,6 +1297,31 @@ describe('gaps', () => {
     h.engine.stopTicket(stopped)
     expect(() => h.engine.reply({ purpose: 'result', ticketId: stopped, text: 'x' })).toThrow(new UserError('notReady'))
   })
+  it.each(['ready', 'dropped'] as const)('retains a %s result when a follow-up resumes before its notification', state => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state, summary: 'Original result' })
+    const finished = h.repo.tickets.get(ticketId)!
+    const assignmentId = finished.assignments.at(-1)!.id
+    // Exercise upgrade compatibility too: older stored tickets have no result receipt.
+    delete finished.result
+    h.repo.tickets.save(finished)
+    h.tick(2); h.engine.receive(trigger('2')); h.settle()
+    const resumed = h.repo.tickets.get(ticketId)!
+    expect(resumed.ended).toBeUndefined()
+    expect(resumed.assignments.at(-1)!.id).not.toBe(assignmentId)
+    expect(resumed.result).toMatchObject({ assignmentId, outcome: state === 'ready' ? 'completed' : 'dropped' })
+    h.engine.report(ticketId, { state: 'failed', summary: 'Follow-up failed' })
+    const sent = h.outbox.length
+    const request = { purpose: 'result' as const, ticketId, text: 'Original result' }
+    expect(h.engine.reply(request)).toMatchObject({ reused: false })
+    expect(h.engine.reply(request)).toMatchObject({ reused: true })
+    expect(h.outbox).toHaveLength(sent + 1)
+    expect(h.outbox.at(-1)!.channel).toEqual(trigger('1').channel)
+    expect(h.repo.tickets.get(ticketId)!.assignments.at(-1)!.report?.state).toBe('failed')
+    h.engine.stopTicket(ticketId)
+    expect(() => h.engine.reply(request)).toThrow(new UserError('notReady'))
+  })
   it('keeps an Eval\'s deadline on a repeated delivery, refuses to queue a held Trigger again, and puts expired Triggers first', () => {
     const h = harness()
     h.engine.receive(trigger('1')); h.pump()
