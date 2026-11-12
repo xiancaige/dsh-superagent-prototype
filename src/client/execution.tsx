@@ -50,6 +50,12 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   </>
 }
 
+/**
+ * What the browser accepts as the Ticket directory root: an absolute path on POSIX or Windows (`/srv/work`, `E:/work`, `E:\work`,
+ * `\\host\share`), as the server's `executor.directory` does. A POSIX-only pattern refuses a saved Windows root and so blocks every
+ * save of this form, whichever field changed. Slashes are escaped inside the classes because browsers compile it with the `v` flag.
+ */
+export const ABSOLUTE_PATH_PATTERN = '(?:[\\\\\\/]|[A-Za-z]:[\\\\\\/]).*'
 const firstSentence = (text: string): string => /^[^。；;.]*(?:[。；;]|\.(?=\s|$))?/.exec(text)?.[0] ?? text
 function EnvironmentVariables({ groups, sources,
   onPick }: { groups: SettingsView['environment']['variables']; sources: SourceView[]; onPick: (key: string) => void }) {
@@ -105,7 +111,8 @@ export function ExecutionSettings() {
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
-            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
+            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false}
+              pattern={ABSOLUTE_PATH_PATTERN}
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>

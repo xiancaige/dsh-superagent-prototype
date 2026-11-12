@@ -2,6 +2,7 @@
 // The Execution status, a Ticket, and the Execution settings.
 import { act } from 'react'
 import { expect, it } from 'vitest'
+import { ABSOLUTE_PATH_PATTERN } from '../src/client/execution.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import { threadPath } from '../src/client/route.ts'
 import { usePanel, mount, mountAt, unmountPanel, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
@@ -138,6 +139,28 @@ it('keeps what a person types in the Execution settings, converting it once on s
   await click(zh.save)
   expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ', maxWorkers: 2 } })
   expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
+})
+
+it('saves the Executor settings when the saved Ticket directory root is a Windows path', async () => {
+  // The browser checks every field of the form on save, so a root it refuses blocks a change to any other field.
+  server.settings = { ...server.settings, executor: { ...server.settings.executor, directory: 'E:/tp-worktrees' } }
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const root = () => field<HTMLInputElement>(zh.executionDirectory)
+  expect(root().value).toBe('E:/tp-worktrees')
+  expect(root().validity.patternMismatch).toBe(false)
+  await type(field<HTMLInputElement>(zh.maxWorkers), '2')
+  await click(zh.save)
+  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { directory: 'E:/tp-worktrees', maxWorkers: 2 } })
+  // The pattern accepts what the server accepts as absolute and nothing relative, under either flag a browser compiles it with.
+  for (const flag of ['u', 'v']) {
+    const accepts = (value: string) => new RegExp(`^(?:${ABSOLUTE_PATH_PATTERN})$`, flag).test(value)
+    for (const value of ['/srv/work', 'E:/tp-worktrees', 'E:\\tp-worktrees', 'd:\\', '\\\\host\\share\\work']) expect([value, accepts(value)]).toEqual([value, true])
+    for (const value of ['work', './work', 'E:work', 'tp/work']) expect([value, accepts(value)]).toEqual([value, false])
+  }
+  await type(root(), 'tp-worktrees')
+  expect(root().validity.patternMismatch).toBe(true)
 })
 
 it('opens the Thread page its address names, keeps the address of the page on screen, and answers a local question where the panel can', async () => {
