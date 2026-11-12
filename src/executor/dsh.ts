@@ -85,7 +85,7 @@ export interface ExecutorHost {
     | 'assignmentInterrupted'>, 'holdsEnvironment' | 'environmentRefused'> & Partial<Pick<EngineForExecutor, 'holdsEnvironment' | 'environmentRefused'>>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
-  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  readonly effects: Pick<Effects, 'enqueue' | 'handle'> & Partial<Pick<Effects, 'pending'>>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'workspaceMode' | 'sourceRoot'>
@@ -256,6 +256,22 @@ export class DshExecutor implements Executor {
       retry: [5000, 300_000] })
     // Failed input deliveries are recorded on the ticket itself rather than reported through the `delivery` effect health entry (`quiet: true`).
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
+    host.effects.handle('finalize', async ({ ticketId, endedAt, command }) => {
+      const ticket = host.store.tickets.get(ticketId)
+      if (ticket?.ended?.outcome !== 'completed' || ticket.ended.at !== endedAt) return
+      await this.stopped(ticketId)
+      const agent = host.context.agents.get(workerSessionId(ticketId) as SessionId)
+      if (agent && agent.status !== 'idle') throw new Later('Waiting for the completed worker to become idle')
+      if (host.engine.holdsEnvironment?.(ticketId)) throw new Later('Waiting for editor/environment release')
+      const current = host.store.tickets.get(ticketId)
+      if (current?.ended?.at !== endedAt || current.ended.outcome !== 'completed') return
+      const directory = ticket.execution?.directory
+      if (!directory) throw new Error('No ticket workspace to finalize')
+      const env = Object.fromEntries(host.environment(ticket).map(variable => [variable.key, variable.value]))
+      await runAsWorker(host.context.subprocess,
+        process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
+        dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
+    }, { limit: () => host.paused() ? 0 : 1, retry: [5000, 300_000] })
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text), and the worker the decision named. */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
@@ -300,6 +316,7 @@ export class DshExecutor implements Executor {
   deliver(ticket: Ticket, _assignment: Assignment): void { this.host.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id }) }
   /** Launches a queued assignment unless its ticket ended or a newer assignment replaced it meanwhile. */
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+    if (this.host.effects.pending?.('finalize', ticketId)) throw new Later('Waiting for workspace finalization')
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
     if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
@@ -327,6 +344,7 @@ export class DshExecutor implements Executor {
    * stops immediately if the ticket ended or another assignment took over.
    */
   private async deliverQueued(ticketId: string): Promise<void> {
+    if (this.host.effects.pending?.('finalize', ticketId)) throw new Later('Waiting for workspace finalization')
     // A stop of the worker's background work ends with a cancel, which would drop what is delivered meanwhile.
     await this.stopped(ticketId)
     const first = this.host.store.tickets.get(ticketId)

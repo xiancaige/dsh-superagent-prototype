@@ -38,6 +38,7 @@ const TEXT = {
   'health.runtime': ['dsh-superagent', 'dsh-superagent'],
   'health.models': ['模型服务', 'Model service'],
   'health.ticketAnalysis': ['工单进化分析', 'Ticket evolution analysis'],
+  'health.finalize': ['工单合入与空间回收', 'Ticket integration and workspace reclamation'],
   'health.assessment': ['发给主 Session 的评估', 'Evals sent to the main Session'],
   'health.launch': ['派工启动', 'Assignment launches'],
   'health.delivery': ['输入送达', 'Input delivery to Assignments'],

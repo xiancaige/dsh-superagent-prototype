@@ -28,6 +28,37 @@ const idle = (sessionId: string) => {
   h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
 }
 
+it('queues opted-in finalization only after completion and waits for the worker to idle', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
+  const one = await h.acceptedTicket(feishu('finalize', '@bot 修一'))
+  const agent = h.agents.get(one.sessionId)!
+  agent.status = 'running'
+  // Hold the worker's turn explicitly: stopBackground may cancel it, but its idle event has not arrived yet.
+  agent.cancel.mockImplementation(() => {})
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
+  // Do not drain effects here: finalization intentionally waits on the worker's pending stop.
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.ended?.outcome).toBe('completed')
+  expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(true)
+  expect(h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.includes('echo finalize-ticket'))).toHaveLength(0)
+  idle(one.sessionId)
+  // Advance only this durable row's due time, as a later scheduler pass would.
+  h.runtime.store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'finalize'").run()
+  await h.runtime.idle()
+  expect(h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.includes('echo finalize-ticket'))).toHaveLength(1)
+  expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(false)
+})
+
+it('does not finalize a dropped ticket even with an opted-in command', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, finalize: 'echo finalize-ticket' } })
+  const one = await h.acceptedTicket(feishu('finalize-drop', '@bot 检查'))
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'No work' })
+  await h.runtime.idle()
+  expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(false)
+  expect(h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.includes('echo finalize-ticket'))).toHaveLength(0)
+})
+
 it('evaluates a message that arrives on a thread while an earlier candidate\'s card waits for its link, in the thread\'s next Eval', async () => {
   const gate = deferred()
   // The first candidate's source link lookup is slow; Feishu allows it up to linkTimeoutMs.

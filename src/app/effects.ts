@@ -9,6 +9,8 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
+  /** Host cleanup after confirmed completion; guarded again against a resumed ticket. */
+  finalize: { ticketId: string; endedAt: string; command: string }
   /** Direct evolution analysis after a committed ticket end; the key is the ticket ID. */
   ticketAnalysis: import('./ticket-analysis.ts').TicketAnalysisInput
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
