@@ -3,9 +3,9 @@
  * worktree (`requirePublication`). A ticket is only done once nothing is left in its worktree and every commit it made is
  * contained in a remote branch, so a worker's `ready` never ends a ticket whose work lives on one machine only.
  *
- * Pure reads (`git status`, `git branch -r --contains`); it never fetches, pushes, stashes or cleans. The remote-tracking
- * refs a worker's own `git push` updates are the evidence, so a push that failed leaves the commit uncontained and the
- * ticket open with the reason. Submodules are checked the same way, each by its own HEAD.
+ * Pure reads (`git status`, `git branch -r --contains`, `git ls-remote`); never fetches, pushes, stashes or cleans.
+ * A containing origin tracking ref must match the live remote branch SHA. Unreachable/deleted/rewritten remote refs
+ * cannot prove publication. Submodules are checked the same way, each by its own HEAD.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -20,7 +20,7 @@ const run: GitRun = (directory, args) => execFileSync('git', ['-C', directory, .
 /** The paths of the initialized submodules (and theirs) of a work tree; `git submodule status` marks an initialized one with ' ' or '+'. */
 function submodules(directory: string, git: GitRun): string[] {
   let text: string
-  try { text = git(directory, ['submodule', 'status', '--recursive']) } catch { return [] }
+  text = git(directory, ['submodule', 'status', '--recursive'])
   return text.split(/\r?\n/).flatMap(line => {
     if (!line || line[0] === '-' || line[0] === 'U') return []
     const relative = line.slice(1).trim().split(/\s+/)[1]
@@ -34,8 +34,12 @@ function unpublishedIn(directory: string, label: string, git: GitRun): string | 
   if (dirty.length) return `${label}: ${dirty.length} uncommitted change(s), such as ${dirty[0]!.trim()}; commit them`
   const detached = git(directory, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD'
   const containing = git(directory, ['branch', '-r', '--contains', 'HEAD']).split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.includes('->'))
-  // A detached submodule HEAD is the pinned commit; it only needs to exist on some remote branch.
-  if (!containing.length) return `${label}: HEAD ${git(directory, ['rev-parse', '--short', 'HEAD']).trim()} is in no remote branch${detached ? ' (detached)' : ''}; push it`
+  // Tracking refs alone may be stale (deleted/rewritten remote branch). Confirm the containing ref's exact SHA live.
+  const live = new Set(git(directory, ['ls-remote', '--heads', 'origin']).split(/\r?\n/).filter(Boolean))
+  const verified = containing.filter(ref => ref.startsWith('origin/') && live.has(
+    `${git(directory, ['rev-parse', `refs/remotes/${ref}`]).trim()}\trefs/heads/${ref.slice('origin/'.length)}`))
+  // A detached submodule HEAD is the pinned commit; it needs to exist on a verified origin branch.
+  if (!verified.length) return `${label}: HEAD ${git(directory, ['rev-parse', '--short', 'HEAD']).trim()} is in no remote branch${detached ? ' (detached)' : ''}; push it`
   return undefined
 }
 

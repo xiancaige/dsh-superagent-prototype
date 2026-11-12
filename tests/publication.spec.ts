@@ -69,6 +69,19 @@ describe('unpublishedReason', () => {
     expect(unpublishedReason(work)).toMatch(/no remote branch/)
   })
 
+  it('refuses stale tracking refs after the remote branch was deleted', () => {
+    const { origin, work } = repository()
+    git(origin, 'update-ref', '-d', 'refs/heads/main')
+    expect(git(work, 'branch', '-r', '--contains', 'HEAD')).toContain('origin/main')
+    expect(unpublishedReason(work)).toMatch(/no remote branch/)
+  })
+
+  it('refuses an unreachable origin despite a containing tracking ref', () => {
+    const { work } = repository()
+    git(work, 'remote', 'set-url', 'origin', path.join(scratch(), 'missing.git'))
+    expect(unpublishedReason(work)).toMatch(/could not prove/)
+  })
+
   it('treats a git failure as a reason, never as proof of publication', () => {
     const { work } = repository()
     const failing = (_directory: string, args: readonly string[]) => {
