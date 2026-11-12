@@ -314,6 +314,10 @@ export class Runtime extends Service implements SourceHost {
           // survive restart, and never ask a broadcast listener or an LLM to notice the end.
           if (event.type === 'ticket.ended') {
             const { ticketId, by, outcome, reason } = event.data
+            const command = store.settings().executor.finalize.trim()
+            if (outcome === 'completed' && command && machine.workspaceMode !== 'source') {
+              effects.enqueue('finalize', ticketId, { ticketId, endedAt: event.at, command })
+            }
             effects.enqueue('ticketAnalysis', ticketId, { ticketId, sessionId: workerSessionId(ticketId), by, outcome,
               ...reason ? { reason } : {}, at: event.at })
           }
