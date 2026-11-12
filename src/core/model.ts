@@ -294,6 +294,8 @@ export interface Ticket {
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   /** Open question for a person; cleared by the executor or when the ticket ends. */
   attention?: Attention
+  /** Last finished result, retained across follow-up resumption so its notification does not lose eligibility. */
+  result?: { assignmentId: string; outcome: 'completed' | 'merged' | 'dropped'; at: string }
   assignments: Assignment[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */

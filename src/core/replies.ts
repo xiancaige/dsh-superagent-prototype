@@ -70,10 +70,15 @@ export class Replies extends EnginePart {
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
       const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
-      const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported
+      const resultIndex = ticket?.result ? ticket.assignments.findIndex(item => item.id === ticket.result!.assignmentId) : -1
+      const retained = outcome !== 'stopped' && outcome !== 'closed' && resultIndex >= 0
+      const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported || retained
       if (!ticket || !ready) throw new UserError('notReady')
-      // Even a dropped result must not be used as an unvalidated success publication.
-      assertTicketValidated(ticket)
+      // Validate a delayed finished result against its original assignment, not the follow-up's new one.
+      // Keep all current acceptance requirements and workspace checks; this is not approval of the resumed work.
+      const validationTicket = retained && !reported && !ticket.ended
+        ? { ...ticket, assignments: ticket.assignments.slice(0, resultIndex! + 1) } : ticket
+      assertTicketValidated(validationTicket)
     }
     const attention = request.purpose === 'attention' ? ticket?.attention : undefined
     // Attention replies must match the ticket's currently open question text.
