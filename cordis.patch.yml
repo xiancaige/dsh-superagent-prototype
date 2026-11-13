@@ -1,6 +1,9 @@
 # dsh-superagent bundle layer: inserts the plugins without configuration, and the agent presets its Sessions run under. The
 # profile supplies the `dsh-superagent` entry's stateDir (see docs/006-deployment.md and examples/profile.cordis.patch.yml); the plugin
-# refuses to start without stateDir.
+# refuses to start without stateDir. Agent Teams are enabled for newly created Sessions by default; stored Session selections still win.
+- id: agent-team
+  config:
+    defaultEnabled: true
 - insert:
     - id: dsh-superagent
       name: dsh-superagent

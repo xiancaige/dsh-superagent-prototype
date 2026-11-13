@@ -15,7 +15,8 @@ async function patched(): Promise<Row[]> {
   const yaml = await import(createRequire(include).resolve('js-yaml')) as { load(text: string, options: { schema: unknown }): unknown }
   const patches = yaml.load(readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8'), { schema: entryListSchema }) as unknown[]
   const warnings: string[] = []
-  const rows = applyEntryPatches([], patches, message => { warnings.push(message) })
+  // Agent Teams is supplied by dsh-base; the bundle patch overrides its defaults.
+  const rows = applyEntryPatches([{ id: 'agent-team', name: '@deepseek-ai/dsh-agent-team', config: { maxTasks: 256 } }], patches, message => { warnings.push(message) })
   expect(warnings).toEqual([])
   return rows
 }
@@ -26,9 +27,15 @@ const flat = (rows: readonly Row[]): Row[] => rows.flatMap(row => [row, ...Array
 const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.config as { id?: string; order?: number; plugins: Row[] })
   .find(config => config?.id === id)!
 
+it('enables Agent Teams by default for new Sessions', async () => {
+  const rows = await patched()
+  const team = rows.find(row => row.id === 'agent-team')
+  expect(team?.config).toEqual({ defaultEnabled: true })
+})
+
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
-  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-local', 'dsh-superagent-feishu', 'dsh-superagent-wecom',
+  expect(rows.map(row => row.id)).toEqual(['agent-team', 'dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-local', 'dsh-superagent-feishu', 'dsh-superagent-wecom',
     'dsh-superagent-worker-preset', 'dsh-superagent-worker-ops-preset', 'dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
