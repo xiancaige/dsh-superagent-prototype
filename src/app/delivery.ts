@@ -58,6 +58,10 @@ export class AgentDelivery {
     await state.loaded
     return state
   }
+  /** Whether history contains the message: a pending inbox is not consumption. */
+  async consumed(agent: Agent, requestId: string): Promise<boolean> {
+    return (await this.history(agent)).ids.has(messageId(requestId))
+  }
   async holds(agent: Agent, requestId: string): Promise<boolean> {
     const id = messageId(requestId)
     return (await this.history(agent)).ids.has(id) || [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => deliveryId(message) === id)

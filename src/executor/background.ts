@@ -13,11 +13,15 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
+/** The current tree API and the older direct-child API (kept for pre-tree DSH hosts). */
 interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
+  waitForTreeWork?(root: Agent): Promise<boolean>
+  listDescendants?(rootSessionId: SessionId): Promise<readonly { id: string; activity?: string }[]>
+  // DSH calls this authority `ancestor`, not `agent`; it verifies the exact live Agent and its ancestry.
+  interrupt?(targetSessionId: SessionId, authority: { kind: 'ancestor'; agent: Agent }): void
+  waitForChildren?(parent: Agent): Promise<boolean>
+  listChildren?(parentSessionId: string): Promise<readonly { id: string }[]>
+  drainChildren?(parent: Agent, childIds: readonly string[]): Promise<void>
 }
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
@@ -49,7 +53,9 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    const wait = subagents.waitForTreeWork ?? subagents.waitForChildren
+    if (!wait) return Promise.resolve(false)
+    join = wait.call(subagents, agent).finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
@@ -134,18 +140,32 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
 }
 
 /**
- * Release the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the release
- * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
- * with that turn. Its Session still admits subagents.
+ * Stop the worker's live descendants without closing admission for its next Assignment. Current DSH's drainDescendants
+ * permanently closes the exact root, so only interrupt execution and bound the wait for local Agents to become idle.
+ * Older hosts release direct children instead. Either path can wake the worker, whose resulting turn is cancelled last.
  */
 export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
-  // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
+  const modern = subagents.listDescendants && subagents.interrupt
+  const children = modern ? await subagents.listDescendants!(agent.id) : await subagents.listChildren?.(agent.id) ?? []
+  // External executions have no local Agent; their catalog activity still makes them interrupt targets.
+  const live = children.map(child => ({ child, agent: ctx.agents.get(child.id as SessionId) }))
+    .filter(item => item.agent || ('activity' in item.child && item.child.activity === 'running'))
   if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
-  finally {
+  try {
+    if (modern) {
+      const failures: unknown[] = []
+      for (const { child } of live) {
+        try { subagents.interrupt!(child.id as SessionId, { kind: 'ancestor', agent }) }
+        catch (error) { failures.push(error) }
+      }
+      await until(Promise.all(live.flatMap(item => item.agent ? [item.agent.whenIdle()] : [])), undefined, DRAIN_LIMIT_MS)
+      if (failures.length) throw new AggregateError(failures, `Interrupting the subagents of ${agent.id} failed`)
+    } else if (subagents.drainChildren) {
+      await until(subagents.drainChildren(agent, live.map(item => item.child.id)), undefined, DRAIN_LIMIT_MS)
+    }
+  } finally {
     if (agent.status !== 'idle') cancelled.add(agent)
     agent.cancel({ kind: 'user' }, { keepInbox })
     await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
