@@ -26,11 +26,12 @@ function fixture(history: UserMessage[] = []) {
   const send = (id = 'request', mode: 'queue' | 'steer' = 'steer') => delivery.send(agent, id, '{"event_id":"event"}', mode, signal.signal)
   const inject = (id: string, summary: string) => delivery.send(agent, id, '{"settings_saved":"policy"}', { inject: summary }, signal.signal)
   const holds = (id: string) => delivery.holds(agent, id)
+  const consumed = (id: string) => delivery.consumed(agent, id)
   const consume = (message: UserMessage) => {
     inbox.nextStep.splice(0); inbox.nextTurn.splice(0)
     ctx.emit('session/event', agent.session, event(message))
   }
-  return { agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
+  return { agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consumed, consume, signal }
 }
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
@@ -132,6 +133,28 @@ it('injects a notice once, as dsh-superagent\'s notice with its summary, without
   expect(f.injected).toHaveBeenCalledOnce()
   expect(f.injected.mock.calls[0]![0]).toMatchObject({ role: 'user', source: { kind: 'dsh-superagent', form: 'notice', summary: 'Settings saved' } })
   expect([f.steer, f.followup].map(spy => spy.mock.calls.length)).toEqual([0, 0])
+})
+
+it('distinguishes consumption from pending delivery and restores consumption from history', async () => {
+  const f = fixture()
+  expect(await f.consumed('request')).toBe(false)
+  await f.send('request')
+  expect(await f.holds('request')).toBe(true)
+  expect(await f.consumed('request')).toBe(false)
+  const message = f.steer.mock.calls[0]![0]
+  f.consume(message)
+  expect(await f.consumed('request')).toBe(true)
+  const restored = fixture([message])
+  expect(await restored.consumed('request')).toBe(true)
+  expect(await restored.consumed('other')).toBe(false)
+})
+
+it('observes consumption racing the initial history read without counting a pending inbox', async () => {
+  const f = fixture()
+  const message = createUserMessage({ content: [], source: { kind: 'user', rpcId: 'request' } })
+  f.inbox.nextStep.push(message)
+  f.read.mockImplementationOnce(async () => { f.consume(message); return { events: [] } })
+  expect(await f.consumed('request')).toBe(true)
 })
 
 it('tells whether the Session holds a message: one waiting in its inbox, one it took, and one in its stored history', async () => {

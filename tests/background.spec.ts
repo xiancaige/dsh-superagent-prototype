@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
-import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
+import { cancelled, stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
@@ -74,4 +74,109 @@ it('gives up a release of subagents that does not end within 10 seconds, and can
     await stopping
   } finally { vi.useRealTimers() }
   expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+/** Model the current tree API, including descendants without a local Agent (external execution). */
+function treeSetup() {
+  const legacy = setup(async () => { throw new Error('must prefer tree join') })
+  const child = { whenIdle: vi.fn(async () => {}) }
+  const grandchild = { whenIdle: vi.fn(async () => {}) }
+  const agents = new Map<string, unknown>([[legacy.agent.id, legacy.agent], ['child-1', child], ['grandchild-1', grandchild]])
+  const tree = {
+    ...legacy.subagents,
+    waitForTreeWork: vi.fn(async () => false),
+    listDescendants: vi.fn(async () => [
+      { id: 'child-1', activity: 'running' }, { id: 'grandchild-1', activity: 'running' },
+      { id: 'external-1', activity: 'running' }, { id: 'cold-child', activity: 'inactive' },
+    ]),
+    interrupt: vi.fn((_id: string, _authority: { kind: 'ancestor'; agent: Agent }) => {}),
+    drainDescendants: vi.fn(async () => { throw new Error('would permanently disable the worker') }),
+  }
+  const ctx = {
+    get: (name: string) => name === 'subagents' ? tree : name === 'jobs' ? legacy.jobs.service : undefined,
+    agents: { get: (id: string) => agents.get(id) },
+  } as unknown as Context
+  return { ...legacy, ctx, tree, child, grandchild, agents }
+}
+
+it('prefers waitForTreeWork on current DSH and still rechecks worker idle', async () => {
+  const { ctx, agent, tree } = treeSetup()
+  tree.waitForTreeWork.mockImplementationOnce(async () => true)
+  expect(await untilQuiet(ctx, agent, new AbortController().signal)).toBe(true)
+  expect(tree.waitForTreeWork).toHaveBeenCalledTimes(2)
+  expect(tree.waitForTreeWork).toHaveBeenCalledWith(agent)
+  expect(tree.waitForChildren).not.toHaveBeenCalled()
+})
+
+it('supports a current host with none of the legacy subagent methods', async () => {
+  const { ctx, agent, tree } = treeSetup()
+  const current = {
+    waitForTreeWork: tree.waitForTreeWork, listDescendants: tree.listDescendants, interrupt: tree.interrupt,
+  }
+  const currentCtx = { ...ctx, get: (name: string) => name === 'subagents' ? current : ctx.get(name) } as unknown as Context
+  expect(await untilQuiet(currentCtx, agent, new AbortController().signal)).toBe(true)
+  await stopSubagents(currentCtx, agent)
+  expect(tree.interrupt).toHaveBeenCalledTimes(3)
+})
+
+it('shares a pending current tree join across aborted looks', async () => {
+  const { ctx, agent, tree } = treeSetup()
+  tree.waitForTreeWork.mockImplementation(() => new Promise(() => {}))
+  for (let look = 0; look < 3; look++) {
+    const stop = new AbortController()
+    const quiet = untilQuiet(ctx, agent, stop.signal)
+    stop.abort()
+    expect(await quiet).toBe(false)
+  }
+  expect(tree.waitForTreeWork).toHaveBeenCalledTimes(1)
+})
+
+it('interrupts all live descendants with exact ancestor authority without closing admission', async () => {
+  const { ctx, agent, tree, child, grandchild } = treeSetup()
+  for (let assignment = 0; assignment < 2; assignment++) await stopSubagents(ctx, agent, true)
+  expect(tree.listDescendants).toHaveBeenCalledWith(agent.id)
+  for (const id of ['child-1', 'grandchild-1', 'external-1']) {
+    expect(tree.interrupt).toHaveBeenCalledWith(id, { kind: 'ancestor', agent })
+  }
+  expect(tree.interrupt).toHaveBeenCalledTimes(6)
+  expect(child.whenIdle).toHaveBeenCalledTimes(2)
+  expect(grandchild.whenIdle).toHaveBeenCalledTimes(2)
+  expect(tree.drainDescendants).not.toHaveBeenCalled()
+  expect(tree.drainChildren).not.toHaveBeenCalled()
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
+})
+
+it('bounds current descendant idle waits and cancels the woken worker last', async () => {
+  const { ctx, agent, tree, child } = treeSetup()
+  child.whenIdle.mockImplementation(() => new Promise(() => {}))
+  tree.interrupt.mockImplementation(() => { (agent as { status: string }).status = 'running' })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    const stopping = stopSubagents(ctx, agent)
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(agent.cancel).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await stopping
+  } finally { vi.useRealTimers() }
+  expect(cancelled.has(agent)).toBe(true)
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+it('continues interrupting after an authority rejection and cancels the worker before reporting failure', async () => {
+  const { ctx, agent, tree, grandchild } = treeSetup()
+  const denied = new Error('UNAUTHORIZED')
+  tree.interrupt.mockImplementationOnce(() => { throw denied })
+  await expect(stopSubagents(ctx, agent)).rejects.toMatchObject({ errors: [denied] })
+  expect(tree.interrupt).toHaveBeenCalledTimes(3)
+  expect(grandchild.whenIdle).toHaveBeenCalledTimes(1)
+  expect(agent.cancel).toHaveBeenCalledTimes(1)
+})
+
+it('does not cancel a worker when only cold catalog descendants remain', async () => {
+  const { ctx, agent, tree, agents } = treeSetup()
+  agents.delete('child-1'); agents.delete('grandchild-1')
+  tree.listDescendants.mockResolvedValue([{ id: 'cold-child', activity: 'inactive' }])
+  await stopSubagents(ctx, agent)
+  expect(tree.interrupt).not.toHaveBeenCalled()
+  expect(agent.cancel).not.toHaveBeenCalled()
 })

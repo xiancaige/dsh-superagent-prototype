@@ -216,6 +216,21 @@ beforeEach(async () => {
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
 
+it('starts candidate timing on the master consumption event, not inbox delivery', async () => {
+  const trigger = feishu('timing', '请修复回归')
+  await receive(trigger)
+  const thread = () => runtime.store.threads.get(threadKey(trigger.threads[0]!))!
+  expect(thread().evaluating!.delivered).toBeUndefined()
+  const agent = agents.get(runtime.masterId)!
+  const message = agent.inbox.nextStep.find(message => JSON.parse(message.content[0]!.type === 'text' ? message.content[0]!.text : '{}').kind === 'candidate')!
+  expect(message).toBeDefined()
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  ctx.emit('session/event', { id: 'another-session' } as never, { type: 'user/message', seq: 1, time: Date.now(), data: message } as never)
+  expect(thread().evaluating!.delivered).toBeUndefined()
+  ctx.emit('session/event', { id: runtime.masterId } as never, { type: 'user/message', seq: 2, time: Date.now(), data: message } as never)
+  expect(thread().evaluating!.delivered).toBeDefined()
+})
+
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
   const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!

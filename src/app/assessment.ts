@@ -13,7 +13,7 @@ import type { TriggerContext } from '../sources/kind.ts'
 import { relatedTickets } from './cards.ts'
 import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
-import type { Effects } from './effects.ts'
+import { Later, type Effects } from './effects.ts'
 
 /** Schema for a short lowercase kebab-case English ticket worktree name (1–4 words, at most 32 characters). */
 export const WorktreeNameSchema = z.string().max(32).regex(/^[a-z]+(?:-[a-z0-9]+){0,3}$/, 'Use 1–4 short English words in lowercase kebab-case, at most 32 characters').describe('Meaningful short English ticket name, e.g. fix-plan-color. Translate Chinese titles into English; no Chinese, pinyin or generic ticket names. 1–4 lowercase words in kebab-case, at most 32 characters.')
@@ -58,8 +58,11 @@ export interface AssessorHost {
   paused(): boolean
   /** Thread context reader for `trigger`'s Source, or `undefined` when the Source has none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
-  /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
+  /** Delivers a candidate card to the main Session inbox once per request ID; this does not confirm consumption. */
   deliver(requestId: string, text: string): Promise<void>
+  /** Stable delivery message ID, and history-only consumption check for restart recovery. */
+  deliveryId(requestId: string): string
+  consumed(requestId: string): Promise<boolean>
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
 }
 
@@ -90,14 +93,30 @@ export class MasterAssessor implements Assessor {
   /** Per-evaluation read caches and thread contexts, keyed by `evalId`. */
   private readonly evals = new Map<string, EvalReads>()
   private readonly controller = new AbortController()
+  private readonly deliveries = new Map<string, { evalId: string; triggerId: string }>()
+  /** Called only for a main Session user/message event, never for inbox insertion. */
+  consumed(messageId: string): void {
+    const delivery = this.deliveries.get(messageId)
+    if (!delivery) return
+    this.deliveries.delete(messageId)
+    if (this.host.engine.candidate(delivery.triggerId)?.evalId === delivery.evalId) this.host.engine.candidateDelivered(delivery.evalId)
+  }
   /** Registers the handler that relays each Eval's candidate card, which a link lookup may delay for seconds. */
   constructor(private readonly host: AssessorHost) {
-    // Start the evaluation deadline only after the main Session receives the candidate card, so a busy Session does not consume evaluation time.
+    // Start the evaluation deadline only after the main Session consumes the candidate card, not while it is queued.
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
-      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
-      this.host.engine.candidateDelivered(evalId)
+      const requestId = `candidate:${evalId}`, messageId = this.host.deliveryId(requestId)
+      const text = JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) })
+      if (this.host.engine.candidate(triggerId)?.evalId !== evalId) return
+      // Register before delivery: an idle Session may consume synchronously during steer().
+      this.deliveries.set(messageId, { evalId, triggerId })
+      await this.host.deliver(requestId, text)
+      // Replayed effects may find the message already in persisted history after a restart.
+      if (await this.host.consumed(requestId)) this.consumed(messageId)
+      // Keep the durable effect until consumption, so a restart cannot orphan a queued candidate.
+      if (this.deliveries.has(messageId)) throw new Later('Candidate is waiting in the main Session inbox')
     }, { limit: () => host.paused() ? 0 : 4 })
   }
   /** Enqueues an `assessment` effect to deliver `candidate`'s card to the main Session. */
@@ -105,7 +124,10 @@ export class MasterAssessor implements Assessor {
   /** Whether `evalId` is still the active evaluation for `trigger`. */
   private live(evalId: string, trigger: Trigger): boolean { return this.host.engine.candidate(trigger.id)?.evalId === evalId }
   /** Drop an Eval's context and reads once it finishes; any running load for it discards its result. */
-  release(evalId: string): void { this.evals.delete(evalId) }
+  release(evalId: string): void {
+    this.evals.delete(evalId)
+    for (const [messageId, delivery] of this.deliveries) if (delivery.evalId === evalId) this.deliveries.delete(messageId)
+  }
   /** Resolve the active evaluation for a trigger; historical triggers have none, and explicit requests are routed instead. */
   private evalFor(triggerId: string): { candidate: Candidate; trigger: Trigger } {
     const candidate = this.host.engine.candidate(triggerId)
@@ -278,5 +300,5 @@ export class MasterAssessor implements Assessor {
     return { state: decision.kind, ...(decision.ticketId ? { ticket_id: decision.ticketId } : {}), reason: reasonText(decision.reason) }
   }
   /** Aborts any in-flight thread context or repository read commands when the runtime stops. */
-  stop(): void { this.controller.abort() }
+  stop(): void { this.controller.abort(); this.deliveries.clear() }
 }

@@ -36,10 +36,12 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const sources = new SourceRegistry(() => SettingsSchema.parse({}))
   sources.register(githubKind)
   let engine!: Engine
+  let deliverEffect!: (payload: { triggerId: string }, evalId: string) => Promise<void>
   const host: AssessorHost = {
     get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
-    effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
+    effects: { enqueue: () => {}, handle: (_kind, run) => { deliverEffect = run as typeof deliverEffect } }, paused: () => false, deliver: async () => {},
+    deliveryId: id => id, consumed: async () => false, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
   }
   const assessor = new MasterAssessor(host)
   const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: () => ({ admissible: true, strength, basis: { via: 'followup' } }),
@@ -57,11 +59,52 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   // Per-Eval state retained by the assessor and released when the Eval ends.
   const kept = assessor as unknown as { evals: Map<string, unknown> }
   const size = () => kept.evals.size
-  return { repo, engine, assessor, tools, size, gate }
+  return { repo, engine, assessor, tools, size, gate, host, deliverEffect: (...args: Parameters<typeof deliverEffect>) => deliverEffect(...args) }
 }
 const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: 'github', threads: [{ source: 'github', id: String(n) }], actor: { source: 'github', id: 'bob' }, human: true,
   at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`, meta: { number: n } })
 const signal = new AbortController().signal
+
+it('starts the deadline only on consumption and keeps an inbox-only delivery durable', async () => {
+  const s = setup('explicit')
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const candidate = s.engine.candidate('issue-1')!
+  const delivered = vi.spyOn(s.engine, 'candidateDelivered')
+  await expect(s.deliverEffect({ triggerId: 'issue-1' }, candidate.evalId)).rejects.toThrow('waiting in the main Session inbox')
+  expect(delivered).not.toHaveBeenCalled()
+  expect(s.repo.threads.get('github:1')!.evaluating!.delivered).toBeUndefined()
+  s.assessor.consumed(`candidate:${candidate.evalId}`)
+  expect(delivered).toHaveBeenCalledExactlyOnceWith(candidate.evalId)
+  s.assessor.consumed(`candidate:${candidate.evalId}`)
+  expect(delivered).toHaveBeenCalledTimes(1)
+})
+
+it('recovers a retained effect after restart using consumed history, not an inbox', async () => {
+  const s = setup()
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const candidate = s.engine.candidate('issue-1')!
+  await expect(s.deliverEffect({ triggerId: 'issue-1' }, candidate.evalId)).rejects.toThrow('waiting')
+  const restored = new MasterAssessor(s.host)
+  await expect(s.deliverEffect({ triggerId: 'issue-1' }, candidate.evalId)).rejects.toThrow('waiting')
+  expect(s.repo.threads.get('github:1')!.evaluating!.delivered).toBeUndefined()
+  s.host.consumed = async () => true
+  await s.deliverEffect({ triggerId: 'issue-1' }, candidate.evalId)
+  expect(s.repo.threads.get('github:1')!.evaluating!.delivered).toBeDefined()
+  restored.stop()
+})
+
+it('handles consumption during delivery and rejects stale consumption after an Eval ends', async () => {
+  const s = setup()
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const candidate = s.engine.candidate('issue-1')!
+  s.host.deliver = async id => { s.assessor.consumed(id) }
+  await s.deliverEffect({ triggerId: 'issue-1' }, candidate.evalId)
+  expect(s.repo.threads.get('github:1')!.evaluating!.delivered).toBeDefined()
+  s.engine.decide('issue-1', { kind: 'ignore', reason: 'done' })
+  const delivered = vi.spyOn(s.engine, 'candidateDelivered')
+  s.assessor.consumed(`candidate:${candidate.evalId}`)
+  expect(delivered).not.toHaveBeenCalled()
+})
 
 it('keeps nothing for an Eval once it is decided, as for one that timed out', async () => {
   const s = setup()
