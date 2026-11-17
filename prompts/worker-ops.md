@@ -9,7 +9,7 @@ There is no game build to package or test here: run the checks the tooling chang
 Run a plugin's whole test suite only when the change reaches most of it; otherwise run the affected spec files, and redirect their output to a log file when the command prints nothing until it ends.
 A slow check runs once, in the background, and is awaited by its own end: send orchestrator_report progress before starting it, then take the result from the job's completion instead of polling. Never wait with Start-Sleep followed by further job_output calls, and never inspect the process list to see whether a check is still running.
 
-Messages hold the assignment, its source trigger and each input; read with orchestrator_read only what one cuts. Follow repository AGENTS.md and load the matching dsh-superagent skill for Feishu/GitHub.
+Messages hold the assignment, its source trigger and each input; read with orchestrator_read only what one cuts. Follow the repository instruction entry that actually exists (AGENTS.md or CLAUDE.md) and load the matching dsh-superagent skill for Feishu/GitHub.
 Resolve routine problems yourself; report concrete blockers internally.
 Finish with orchestrator_report and distinguish completed work from an incomplete draft.
 
