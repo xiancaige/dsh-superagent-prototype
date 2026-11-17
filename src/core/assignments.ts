@@ -13,6 +13,8 @@ import { automatic, type Tickets } from './tickets.ts'
 export interface WorkerReport {
   state: ReportState
   summary: string
+  /** Implementation alone is not business acceptance; omitted on legacy reports. */
+  completion?: 'implementation' | 'accepted'
   /** Open question for a person: a string asks it, `null` clears an open one, and `undefined` keeps the current one. */
   question?: string | null
   /** The person's message whose request raised the question; routes the question to the channel where it was written. */
@@ -90,6 +92,15 @@ export class Assignments extends EnginePart {
     const report = running.report
     const busy = !!running.deliveredAt && !!report && running.deliveredAt >= report.at
     const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
+    if (running.modelFailure?.hostResumeBudget === 0
+      && (!running.deliveredAt || running.deliveredAt <= running.modelFailure.at)) {
+      // Persisted before the async error report: a crash in that gap must not rebill a
+      // model turn, nor may equal millisecond timestamps replenish the budget.
+      if (report?.state !== 'failed') this.report(ticketId, { state: 'failed', summary:
+        `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${running.modelFailure.error}` })
+      if (ticket.undelivered.length) this.options.executor.deliver(this.require(ticketId), running)
+      return
+    }
     if (!settled) this.tickets.restart(ticket, running, 'hostRestarted', RECOVERY_NOTE)
     else if (ticket.undelivered.length) this.options.executor.deliver(ticket, running)
   }
@@ -113,7 +124,8 @@ export class Assignments extends EnginePart {
     const assignment = runningAssignment(ticket) ?? latestAssignment(ticket)
     if (!assignment) throw new UserError('unknownAssignment')
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
-    if (report.state === 'ready') assertTicketValidated(ticket)
+    if (report.completion && report.state !== 'ready') throw new Error('completion is only valid with ready')
+    if (report.state === 'ready' && report.completion !== 'implementation') assertTicketValidated(ticket)
     const at = this.now()
     const previous = ticket.attention
     const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
@@ -123,14 +135,16 @@ export class Assignments extends EnginePart {
     else delete ticket.attention
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
-    assignment.report = { state: report.state, summary: report.summary, at }
+    assignment.report = { state: report.state, summary: report.summary, at,
+      ...(report.completion ? { completion: report.completion } : {}) }
     ticket.updatedAt = at
     if (report.answers && !ticket.answers?.includes(report.answers)) ticket.answers = [...ticket.answers ?? [], report.answers]
     if (report.answers) this.takeUp(ticketId, report.answers)
     if (report.state === 'blocked' || report.state === 'failed') ticket.undelivered = ticket.undelivered.filter(id => !automatic(ticket.inputs.find(input => input.id === id)))
     this.repo.tickets.save(ticket)
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
-    const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
+    const ready = report.completion === 'implementation' ? undefined
+      : !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.
     const outcome = report.state === 'dropped' ? this.tickets.followsDone(ticket)?.outcome ?? 'dropped' : report.state === 'ready' ? ready : undefined
     if (outcome) this.tickets.end(ticketId, 'executor', outcome, at)

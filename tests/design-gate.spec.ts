@@ -98,19 +98,16 @@ describe('opt-in host-managed design confirmation', () => {
     f.approve(); await deliver.call(subject, ticket.id)
     expect(prompt).toHaveBeenCalledTimes(1); expect(f.current().undelivered).toEqual([])
   })
-  it('defers transient-timer continuation durably instead of prompting or spinning while design is unapproved', () => {
+  it('has no host transient-timer continuation that could bypass design or rebill model retries', () => {
     const f = fixture(); f.engine.assignmentStarted(f.ticket.id, 'a1'); f.configure()
     const prompt = vi.fn(); const timers: (() => void)[] = []
     const subject = { host: { store: { tickets: f.repo.tickets }, engine: f.engine, closing: () => false, paused: () => false, sessions: { prompt } },
       transient: new Map([['a1', 1]]), resuming: new Set(), running: () => true, after: (_ms: number, go: () => void) => timers.push(go) }
     const resume = (DshExecutor.prototype as unknown as { resumeAfter: (this: unknown, id: string, assignment: string, error: unknown) => void }).resumeAfter
-    resume.call(subject, f.ticket.id, 'a1', new Error('temporary provider error'))
-    expect(timers).toHaveLength(1); timers[0]!()
-    expect(prompt).not.toHaveBeenCalled(); expect(timers).toHaveLength(1)
-    expect(f.current().undelivered).toContain('retry:a1:1')
+    expect(resume).toBeUndefined()
+    expect(prompt).not.toHaveBeenCalled()
+    expect(timers).toHaveLength(0)
     expect(subject.resuming.size).toBe(0)
-    f.executor.deliver.mockClear(); f.approve()
-    expect(f.executor.deliver).toHaveBeenCalledTimes(1)
     expect(f.current().assignments).toHaveLength(1)
   })
   it('binds only design bytes; source edits remain valid but document edits block start and completion', () => {

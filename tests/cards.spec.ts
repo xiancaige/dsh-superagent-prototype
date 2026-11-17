@@ -54,7 +54,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'work',
     ['Decide every person\'s message on this ticket\'s own threads yourself', 'back with orchestrator_trigger_handback',
       'never drop a request silently', 'leave ordinary discussion unanswered']],
-  ['A person\'s message resumes an ended ticket without a decision', 'subscriptions', ['a human\'s message there resumes the ticket under the same mandate']],
+  ['A person\'s message resumes only one explicitly identified ended ticket', 'subscriptions', ['one globally unique ticket ID', 'Ambiguous or short probes go to assessment']],
   ['A thread can have several tickets, and its messages reach all of them', 'orchestrator',
     ['Messages on a subscribed thread go directly to the workers of its tickets.'], ['go directly to their worker']],
   ['The gate admits a candidate through the admission table in the Source\'s part of the Policy', 'subscriptions',

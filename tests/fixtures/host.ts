@@ -168,7 +168,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const controller = {
-    create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
+    create: vi.fn(async ({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const sessionTools = new Map<string, RegisteredTool>()
@@ -210,7 +210,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const session = { id: sessionId, header: { id: sessionId, cwd: workspaceId, createdAt: Date.now(), isSeeded: false }, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -249,7 +249,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
   seed?.(seeded)
   seeded.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+  const runtime = new Runtime(ctx, testMachine({ stateDir: directory, sourceRoot: directory }), vi.fn())
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()

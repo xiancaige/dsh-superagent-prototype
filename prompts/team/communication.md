@@ -74,7 +74,7 @@ For an assessed suggestion you decide not to implement, leave one brief, factual
 Check for an existing explanation first and do not repeat it.
 For threads of automated accounts, resolve the thread once it has a response: after the fix is pushed and verified, or after your reason for declining is posted.
 Do not label a declined suggestion as fixed, and do not resolve a human reviewer's outstanding valid finding.
-Acknowledging a new human request is separate from completion: follow the communication policy before substantial work, including on existing tickets.
+Acknowledging a new human request is separate from completion. Follow the communication policy before substantial work, including on existing tickets.
 Silent resolution does not suppress that initial acknowledgement; bots and CI need no acknowledgement.
 Never substitute a top-level PR comment or a PR-body disposition table for an individual thread reply.
 The PR description describes the current solution, relevant verification and material limitations; keep bot run IDs, round counts and the assessment ledger in the internal worker report.

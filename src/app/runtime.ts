@@ -28,7 +28,7 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
-import { installTicketAnalysis } from './ticket-analysis.ts'
+import { installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -91,6 +91,9 @@ function sleepSync(ms: number): void {
  * Locks the state directory before opening SQLite so concurrent processes cannot corrupt or double-migrate state.
  */
 export class Runtime extends Service implements SourceHost {
+  resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
+    return resolveTicketAnalysisSource(this.store, input)
+  }
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts

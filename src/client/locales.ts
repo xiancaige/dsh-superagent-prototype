@@ -360,6 +360,8 @@ const TEXT = {
   endedAtShort: ['{time} {outcome}', '{time} {outcome}'],
   legacyAssignment: ['原始说明', 'Original brief'],
   legacyScopeShort: ['未记录（旧版导入）', 'Not recorded (legacy import)'],
+  acceptancePending: ['实现就绪，待验收：', 'Implementation ready; acceptance pending: '],
+  modelFailureBudget: ['模型轮次已失败；宿主自动恢复剩余额度 {budget}，需人工明确重试。', 'Model turn failed; host automatic resume budget {budget}. Explicit human retry required.'],
   retry: ['重试', 'Retry'],
   failedPrefix: ['失败：', 'Failed: '],
   blockedPrefix: ['受阻：', 'Blocked: '],

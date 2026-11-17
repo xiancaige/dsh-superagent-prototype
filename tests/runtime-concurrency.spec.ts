@@ -63,7 +63,7 @@ it('keeps a human follow-up queued until the running finalizer releases the work
   await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
   idle(one.sessionId)
   await waitUntil(() => h.runtime.executor.workspaceBusy(one.ticket.id))
-  h.runtime.receive(feishu('lease-followup', '继续修复', { root_id: 'om_lease', mentions: [] }))
+  h.runtime.receive(feishu('lease-followup', `工单 ${one.ticket.id} 继续修复`, { root_id: 'om_lease', mentions: [] }))
   await h.runtime.pump()
   expect(h.runtime.store.tickets.get(one.ticket.id)?.ended?.outcome).toBe('completed')
   expect(h.runtime.store.tickets.get(one.ticket.id)?.undelivered.length).toBeGreaterThan(0)
@@ -90,7 +90,7 @@ it('releases a failed finalizer lease while retaining the durable retry', async 
   await h.runtime.idle()
   expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(false)
   expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(true)
-  h.runtime.receive(feishu('failure-followup', '继续修复', { root_id: 'om_lease-failure', mentions: [] }))
+  h.runtime.receive(feishu('failure-followup', `工单 ${one.ticket.id} 继续修复`, { root_id: 'om_lease-failure', mentions: [] }))
   await h.runtime.pump()
   expect(h.runtime.store.tickets.get(one.ticket.id)?.ended).toBeUndefined()
 })
@@ -303,12 +303,12 @@ it('lets a worker go on after a passing provider failure, three times, before it
     fail(busy)
     await vi.advanceTimersByTimeAsync(15_000)
     expect(h.deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === one.sessionId).at(-1)!.text)
-      .toContain('Your last turn failed for a passing reason')
-    expect(latestAssignment(ticket())?.report).toBeUndefined()
+      .not.toContain('Your last turn failed for a passing reason')
+    expect(latestAssignment(ticket())?.report?.state).toBe('failed')
   } finally { vi.useRealTimers() }
   fail(busy); fail(busy)
-  expect(latestAssignment(ticket())?.report).toBeUndefined()
-  // The fourth passing failure fails the ticket, as any other failure does at once.
+  expect(latestAssignment(ticket())?.report?.state).toBe('failed')
+  // Repeated terminal errors remain failures, never another paid turn.
   fail(busy)
   await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Service Unavailable') }))
 })
@@ -323,14 +323,14 @@ describe('a worker that goes on after a passing failure', () => {
     const fail = () => { h.ctx.emit('agent/error', { agent, turn: 1, step: 1, error: busy() } as never) }
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try { fail(); fail(); fail(); await vi.advanceTimersByTimeAsync(60_000) } finally { vi.useRealTimers() }
-    expect(told(one.sessionId)).toHaveLength(3)
-    // Once the resumed turn ends normally, a later passing failure starts a new retry count rather than counting as the fourth in a row.
+    expect(told(one.sessionId)).toHaveLength(0)
+    // Idle cannot erase a terminal model failure or replenish its zero host budget.
     agent.status = 'idle'
     h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
-    await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('waiting'))
+    await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('failed'))
     fail()
     await h.runtime.idle()
-    expect(latestAssignment(ticket())?.report?.state).toBe('waiting')
+    expect(latestAssignment(ticket())?.report?.state).toBe('failed')
   })
   it('waits while processing is paused, and goes on once it resumes', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
@@ -345,7 +345,7 @@ describe('a worker that goes on after a passing failure', () => {
       await h.runtime.settings.pause(false, 'panel')
       await vi.advanceTimersByTimeAsync(5000)
     } finally { vi.useRealTimers() }
-    expect(told(one.sessionId)).toHaveLength(1)
+    expect(told(one.sessionId)).toHaveLength(0)
   })
   it('drops its timer when the host stops within the backoff', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
@@ -740,7 +740,7 @@ describe('what a worker read', () => {
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' }); await h.runtime.idle()
     idle(one.sessionId)
     await later()
-    return { one, thanks: feishu('2', '@bot 谢谢', { root_id: 'om_1' }), ticket: () => h.runtime.store.tickets.get(one.ticket.id)! }
+    return { one, thanks: feishu('2', `@bot ${one.ticket.id} 谢谢`, { root_id: 'om_1' }), ticket: () => h.runtime.store.tickets.get(one.ticket.id)! }
   }
   /** Deliveries to a Session of a message with `text` fail until the returned function lets them through. */
   function failing(sessionId: string, text: string) {
@@ -856,7 +856,7 @@ describe('what a worker read', () => {
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR ready' }); await h.runtime.idle()
     // A person's thanks reaches the worker after the step of its report, and its turn ends with no step taking it.
     await later()
-    const thanks = feishu('2', '@bot 谢谢', { root_id: 'om_1' })
+    const thanks = feishu('2', `@bot ${one.ticket.id} 谢谢`, { root_id: 'om_1' })
     h.runtime.receive(thanks); await h.runtime.idle()
     idle(one.sessionId)
     await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('waiting'))
@@ -876,8 +876,8 @@ it('reports nothing for a worker whose turn ends while it waits out the backoff 
   h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
   await h.runtime.idle()
   await new Promise(resolve => setTimeout(resolve, 20))
-  expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report).toBeUndefined()
-  expect(h.relays(h.runtime.masterId)).toHaveLength(relayed)
+  expect(latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)?.report?.state).toBe('failed')
+  expect(h.relays(h.runtime.masterId)).toHaveLength(relayed + 1)
 })
 it('wakes an idle worker for a status request in the slot kept for a person, while every other slot is taken', async () => {
   const settings = h.runtime.store.settings()
@@ -928,7 +928,7 @@ it('resumes an ended ticket a person wrote to during a pause once it lifts, unde
   const first = await ended('1'), second = await ended('3')
   const followUp = async (id: string, root: string) => {
     await h.runtime.settings.pause(true, 'panel')
-    h.runtime.receive(feishu(id, '再改一下', { mentions: [], root_id: root })); await h.runtime.idle()
+    h.runtime.receive(feishu(id, `工单 ${root === 'om_1' ? first : second} 再改一下`, { mentions: [], root_id: root })); await h.runtime.idle()
   }
   // While processing is paused, the message waits on the ended ticket; the first pass after the pause resumes it.
   await followUp('2', 'om_1')

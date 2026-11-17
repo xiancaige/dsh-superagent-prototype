@@ -1,6 +1,6 @@
 /** Shared view projections for triggers, tickets, threads, decisions, and channel links. */
 import { z } from 'zod'
-import { canRetry, followupOwners, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
+import { canRetry, followupOwners, latestAssignment, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
   type DecisionKind, type Thread, type ThreadFacts, type Ticket, type TicketStage, type Trigger } from '../../core/index.ts'
 import { allowedSender, listedBot } from '../../policy.ts'
 import type { ChannelLink, Localized } from '../../sources/kind.ts'
@@ -126,7 +126,10 @@ export function ticketSummary(ticket: Ticket) {
     // Every started Assignment of a Ticket runs in its one shared worker Session.
     deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
-    directory: attribute(ticket.execution?.directory), summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
+    directory: attribute(ticket.execution?.directory),
+    ...(latestReport(ticket)?.completion ? { completion: latestReport(ticket)!.completion, acceptancePending: latestReport(ticket)!.completion === 'implementation' } : {}),
+    ...(latestAssignment(ticket)?.modelFailure ? { modelFailure: latestAssignment(ticket)!.modelFailure } : {}),
+    summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }
 }
 export type TicketSummaryView = ReturnType<typeof ticketSummary>

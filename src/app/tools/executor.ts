@@ -141,6 +141,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
+        completion: z.enum(['implementation', 'accepted']).optional().describe('With ready: implementation awaits acceptance; accepted asserts the full contract passed. State evidence in summary.'),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
@@ -154,7 +155,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         return host.store.atomic(() => {
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
-          const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+          const report = { state: args.state, summary: args.summary, ...(args.completion ? { completion: args.completion } : {}), ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
