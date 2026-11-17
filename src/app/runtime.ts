@@ -55,6 +55,8 @@ import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } fro
 import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
 import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
 import { unpublishedReason } from './publication.ts'
+import { observeWorkflow, workflowReason } from './workflow-validation.ts'
+import { ticketOfSession } from '../executor/dsh.ts'
 import { SimulatedDelivery } from './simulated-delivery.ts'
 import { exclusivityPort, RECOVERY_HOLDER_PREFIX } from './editor-recovery-lease.ts'
 
@@ -305,6 +307,13 @@ export class Runtime extends Service implements SourceHost {
         candidateCard: candidate => candidateCard(links, candidate) })
       ctx.on('session/event', (session, event) => {
         if (session.id === masterId && event.type === 'user/message') this.assessor.consumed(event.data.id)
+        const ticketId = ticketOfSession(session.id)
+        if (ticketId && (event.type === 'tool/call' || event.type === 'tool/result')) store.atomic(() => {
+          const ticket = store.tickets.get(ticketId)
+          if (!ticket || !liveTicket(ticket) || !ticket.execution?.workflow) return
+          observeWorkflow(ticket.execution.workflow, ticket.execution.directory, event)
+          store.tickets.save(ticket)
+        })
       })
       // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat (see `Mirror`).
       const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu })
@@ -316,7 +325,7 @@ export class Runtime extends Service implements SourceHost {
       const recovery = this.recovery(store)
       const environments = environmentPort(this.environmentHosted?.tickets)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), workflow: workflowReason,
         workspaceBusy: ticketId => executor.workspaceBusy(ticketId),
         // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
         ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'

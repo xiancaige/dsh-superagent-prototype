@@ -497,6 +497,8 @@ export class Tickets extends EnginePart {
       throw new Error('TP environment: the ticket has not passed the acceptance this deployment requires, so it is not completed and keeps the environment for rework')
     }
     // A completion is also the work reaching the remote: uncommitted or unpushed work is not done, and the worker is told why.
+    const workflow = ['completed', 'merged', 'closed'].includes(outcome) ? this.options.workflow?.(ticket) : undefined
+    if (workflow) throw new Error(workflow)
     const unpublished = outcome === 'completed' ? this.options.publication?.(ticket) : undefined
     if (unpublished) throw new Error(`Completion refused: the ticket's work is not published to the remote. ${unpublished}`)
     const completed = outcome === 'completed'

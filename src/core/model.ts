@@ -349,6 +349,8 @@ export interface Follow { thread: string; own: boolean; closed?: { at: string; o
 export interface Execution { name: string; directory: string; assignment: string
   /** Persisted only after the host resolves this worker in its authorized workspace. */
   workerBinding?: { sessionId: string; projectRoot: string; workspaceRoot: string }
+  /** Frozen host policy, Git baseline and successful tool-result coverage; never worker-authored. */
+  workflow?: import('../app/workflow-validation.ts').WorkflowSnapshot
 }
 /**
  * The worker a ticket runs under: `game` for gameplay, assets, content and project C++/Config, which the game worker

@@ -42,6 +42,10 @@ Commands run directly in the enabled Superagent Feishu Source, without an LLM ca
 
 Selection failures are reported, not treated as success. A failure after defaults/earlier sessions changed may leave partial progress; resend a new command to converge. Receipt and reply IDs deduplicate live/history delivery; replay after a crash is convergent and continuation IDs are stable.
 
+## Workflow loading gate (TP extension)
+
+Repository-owned path/task bindings, frozen Git baselines and successful Session read/skill results can block ticket completion independently of prompts. See [workflow validation](docs/workflow-validation.md) for configuration, evidence semantics, limitations and the targeted regression command.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.

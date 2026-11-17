@@ -13,6 +13,7 @@ import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
+import { captureWorkflow } from '../app/workflow-validation.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
@@ -520,6 +521,14 @@ export class DshExecutor implements Executor {
       if (!current()) return
     }
     if (!current()) return
+    // Freeze source-owned policy and Git heads before the worker can act. Preserve across retries/restarts.
+    const workflowSource = this.host.analysisProjectRoot?.() ?? this.host.machine.sourceRoot
+    if (workflowSource) this.host.store.atomic(() => {
+      const stored = this.host.store.tickets.get(ticket.id)
+      if (!stored?.execution || stored.execution.workflow) return
+      const workflow = captureWorkflow(workflowSource, workspace)
+      if (workflow) { stored.execution.workflow = workflow; this.host.store.tickets.save(stored) }
+    })
     // Phase 2 C: a worker that continues (retry, resumed ticket, restart) takes the environment again, or is refused
     // naming its holder; it is never launched on an environment another ticket holds.
     this.host.engine.ensureEnvironment(ticket.id)

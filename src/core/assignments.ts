@@ -126,6 +126,10 @@ export class Assignments extends EnginePart {
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
     if (report.completion && report.state !== 'ready') throw new Error('completion is only valid with ready')
     if (report.state === 'ready' && report.completion !== 'implementation') assertTicketValidated(ticket)
+    if (report.state === 'ready') {
+      const workflow = this.options.workflow?.(ticket)
+      if (workflow) throw new Error(workflow)
+    }
     const at = this.now()
     const previous = ticket.attention
     const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
