@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { assertTicketDesignApproved } from '../core/design.ts'
 import { blockedForEnvironment, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
@@ -27,8 +27,8 @@ export const workerSessionId = (ticketId: string): string => `worker-${ticketId}
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
-/** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
-const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
+/** Maximum transient retries before a worker session is launched; model turns own their retries. */
+const TRANSIENT_TRIES = 3
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
 const BACKGROUND_LIMIT_MS = 30 * 60_000
 /** How long a host stop waits for the workers' background work to stop. */
@@ -524,6 +524,16 @@ export class DshExecutor implements Executor {
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker', ticket.workspaceRole)
     if (!current()) return
+    // Bind the actual host-resolved worker, not caller-supplied analysis directories.
+    const header = agent.session.header
+    const samePath = (a: string, b: string) => process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+    if (header?.cwd && !samePath(header.cwd, workspace)) throw new PrepareFailed('Resolved worker Session belongs to another workspace')
+    if (this.host.machine.sourceRoot && header?.cwd && !header.parentSession && !header.isSeeded) this.host.store.atomic(() => {
+      const stored = this.host.store.tickets.get(ticket.id)
+      if (!stored?.execution || latestAssignment(stored)?.id !== assignment.id) return
+      stored.execution.workerBinding = { sessionId, projectRoot: this.host.machine.sourceRoot!, workspaceRoot: workspace }
+      this.host.store.tickets.save(stored)
+    })
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
     await this.stopped(ticket.id)
     if (!current()) return
@@ -593,8 +603,17 @@ export class DshExecutor implements Executor {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
-      if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
-      void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
+      // agent/error is terminal: the model layer already owns transport retries. Replaying a
+      // turn here silently multiplies that budget and may repeat side effects.
+      this.host.store.atomic(() => {
+        const current = this.host.store.tickets.get(ticket.id)
+        const active = current && runningAssignment(current)
+        if (!current || active?.id !== assignment.id) return
+        active.modelFailure = { at: now(), error: String(error).slice(0, 2000), hostResumeBudget: 0 }
+        this.host.store.tickets.save(current)
+      })
+      void this.background(Promise.resolve().then(() => { this.failed(ticket.id,
+        `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${String(error)}`) }))
     }))
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
@@ -690,50 +709,6 @@ export class DshExecutor implements Executor {
     if (!transient(error) || tries >= TRANSIENT_TRIES) { this.transient.delete(key); return false }
     this.transient.set(key, tries + 1)
     return true
-  }
-  /** Schedules a worker turn retry with exponential backoff after a transient provider or network error. */
-  private resumeAfter(ticketId: string, assignmentId: string, error: unknown): void {
-    const tries = this.transient.get(assignmentId)!
-    const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). Continue the assignment where it stopped.`
-    this.resuming.add(assignmentId)
-    const go = () => {
-      if (this.host.closing()) return
-      const ticket = this.host.store.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
-      // Wait while processing is paused or no wake slot is free.
-      if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
-      const sessionId = workerSessionId(ticketId)
-      const waking = !this.running(ticket)
-      try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
-        if (!(failure instanceof Later)) throw failure
-        this.after(SLOT_WAIT_MS, go); return
-      }
-      const authorize = () => {
-        const current = this.host.store.tickets.get(ticketId)
-        if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignmentId) throw new Error('Retry assignment ended')
-        assertTicketDesignApproved(current, assignmentId)
-      }
-      try { authorize() } catch {
-        if (waking) this.slots.free(ticketId)
-        this.resuming.delete(assignmentId)
-        this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
-        return
-      }
-      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue', authorize)
-        .catch(failure => {
-          const current = this.host.store.tickets.get(ticketId)
-          if (current?.designApproval?.required) {
-            try { assertTicketDesignApproved(current, assignmentId) } catch {
-              this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
-              return
-            }
-          }
-          throw failure
-        })
-      void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
-        .catch(failure => { this.failed(ticketId, String(failure)) }))
-    }
-    this.after(TRANSIENT_BACKOFF_MS * 2 ** (tries - 1), go)
   }
   /** Schedules `then` to run after `ms` milliseconds unless `dispose()` is called first. */
   private after(ms: number, then: () => void): void {

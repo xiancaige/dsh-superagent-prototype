@@ -7,6 +7,14 @@ import type { Tickets } from './tickets.ts'
 
 export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
 
+/** Explicit identifiers, not guesses about natural-language intent. Ambiguous identifiers grant no resumption. */
+export function explicitTicketTarget(trigger: Trigger, tickets: readonly Ticket[]): string | undefined {
+  const quoted = typeof trigger.meta.quotedTicket === 'string' ? trigger.meta.quotedTicket : ''
+  const tokens = quoted ? [quoted] : trigger.text.match(/\b[0-9a-f]{6,64}\b/gi) ?? []
+  const matches = tickets.filter(ticket => tokens.some(token => ticket.id.toLowerCase().startsWith(token.toLowerCase())))
+  return matches.length === 1 ? matches[0]!.id : undefined
+}
+
 /**
  * Ingests incoming triggers from Sources, deduplicating and filtering them against SourceScope before recording thread correlations.
  * Fans listened triggers out to subscribed tickets via Tickets and queues for Eval, on its primary thread, every trigger no
@@ -54,6 +62,10 @@ export class Intake extends EnginePart {
       }
       this.repo.threads.save(thread)
     }
+    // Shared thread membership is context, not authority to restart ended work. Even a
+    // one-word probe formerly resumed every completed ticket subscribed to this chat.
+    const target = explicitTicketTarget(trigger, this.repo.tickets.list())
+    for (const [id, item] of reached) if (!liveTicket(item.ticket) && id !== target) reached.delete(id)
     for (const [ticketId, { ticket, context: followed }] of reached) {
       this.tickets.addInput(ticket, { id: key('input', ticketId, 'trigger', trigger.id), kind: 'trigger', triggerId: trigger.id, at,
         ...trigger.human ? { human: true } : {}, ...followed ? { context: true } : {} })

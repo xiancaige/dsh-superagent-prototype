@@ -5,6 +5,26 @@ import { KV } from '../kv.ts'
 import { Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
 
+export interface TicketAnalysisSource {
+  ticketId: string
+  sessionId: string
+  projectRoot: string
+  workspaceRoot: string
+  outcome: Exclude<TicketOutcome, 'stopped'>
+}
+
+/** Only persisted host bindings authorize automatic worker analysis. Legacy tickets fail closed. */
+export function resolveTicketAnalysisSource(store: Pick<Store, 'tickets'>, input: { ticketId: string; sessionId: string }): TicketAnalysisSource | undefined {
+  const ticket = store.tickets.get(input.ticketId)
+  const binding = ticket?.execution?.workerBinding
+  if (!ticket?.ended || ticket.ended.by !== 'executor' || ticket.ended.outcome === 'stopped'
+    || !ticket.assignments.some(item => item.startedAt) || !binding
+    || input.sessionId !== `worker-${ticket.id}` || binding.sessionId !== input.sessionId
+    || binding.workspaceRoot !== ticket.execution?.directory || !binding.projectRoot || !binding.workspaceRoot) return undefined
+  return { ticketId: ticket.id, sessionId: binding.sessionId, projectRoot: binding.projectRoot,
+    workspaceRoot: binding.workspaceRoot, outcome: ticket.ended.outcome }
+}
+
 export interface TicketAnalysisInput {
   ticketId: string
   sessionId: string
