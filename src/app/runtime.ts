@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
@@ -29,6 +29,7 @@ import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
+import { historyMigrationStore, type HistoryMigrationRequest, type HistoryMigrationService } from './history-migration.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -93,6 +94,17 @@ function sleepSync(ms: number): void {
 export class Runtime extends Service implements SourceHost {
   resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
     return resolveTicketAnalysisSource(this.store, input)
+  }
+  /** Explicit operator maintenance only; intentionally absent from HTTP and model tools. */
+  async migrateHistoricalTicketSources(request: HistoryMigrationRequest): Promise<unknown> {
+    if (typeof request.dryRun !== 'boolean') throw new Error('Historical migration requires explicit dryRun')
+    const service = this.ctx.get('evolveReflect') as unknown as HistoryMigrationService | undefined
+    const deployment = this.setup.deployment
+    const projectRoot = deployment.sourceRoot || (deployment.environment?.projectFile ? dirname(deployment.environment.projectFile) : undefined)
+    if (!projectRoot || !service?.migrateHistory || !service.historyStateHash) throw new Error('Historical migration service is unavailable')
+    return service.migrateHistory({ allowlist: request.ticketIds, apply: !request.dryRun, authorization: request.authorization,
+      store: historyMigrationStore(this.store, this.effects, state => service.historyStateHash(state)),
+      resolver: input => ({ ...input, projectRoot }) })
   }
   readonly store: Store
   readonly setup: Setup
