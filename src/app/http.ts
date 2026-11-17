@@ -61,6 +61,8 @@ export interface HttpHost {
   checkSetup(): void
   requestPass(): void
   models(): Promise<ModelCatalog>
+  resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }): import('./ticket-analysis.ts').TicketAnalysisSource | undefined
+  extractTicketExperience(ticketId: string, requestId: string): Promise<import('./ticket-analysis.ts').TicketAnalysisResult>
   /** Phase 2 C: the shared TP environment's holder, heartbeat and latest release, as a person sees it. */
   environment(): EnvironmentExclusivityView
 }
@@ -212,6 +214,14 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
+    'GET tickets/:id/experience': ({ params }) => {
+      const id = ticket(params.id)
+      return { authorized: !!runtime.resolveTicketAnalysisSource({ ticketId: id, sessionId: `worker-${id}` }) }
+    },
+    'POST tickets/:id/experience': async ({ params, body }) => {
+      const input = z.object({ requestId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/), confirmLlm: z.literal(true) }).strict().parse(await body())
+      return runtime.extractTicketExperience(ticket(params.id), input.requestId)
+    },
     // Management-only transcription; no worker signing tool is registered.
     'GET tickets/:id/review': ({ params }) => ({ review: store.tickets.get(ticket(params.id))!.review ?? null }),
     'PUT tickets/:id/review': async ({ params, body }) => {

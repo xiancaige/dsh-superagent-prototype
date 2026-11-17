@@ -36,6 +36,9 @@ export interface Api {
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
+  /** Explicit loopback maintenance; no client-provided source paths or authority. */
+  'GET tickets/:id/experience': { response: { authorized: boolean } }
+  'POST tickets/:id/experience': { body: { requestId: string; confirmLlm: true }; response: import('./ticket-analysis.ts').TicketAnalysisResult }
   /** Trusted design contract/approval; intentionally no worker approval tool. */
   'GET tickets/:id/design': { response: { designApproval: import('../core/design.ts').DesignApproval | null } }
   'PUT tickets/:id/design': { body: import('../core/design.ts').DesignConfiguration; response: { designApproval: import('../core/design.ts').DesignApproval } }

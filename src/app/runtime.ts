@@ -95,6 +95,26 @@ export class Runtime extends Service implements SourceHost {
   resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
     return resolveTicketAnalysisSource(this.store, input)
   }
+  /** Loopback management only: one explicitly requested attempt, never a history sweep. */
+  async extractTicketExperience(ticketId: string, requestId: string) {
+    const sessionId = `worker-${ticketId}`
+    const source = this.resolveTicketAnalysisSource({ ticketId, sessionId })
+    if (!source) throw new Error('Ticket has no authorized ended worker source')
+    const key = `ticket-experience-maintenance:${ticketId}:${requestId}`
+    if (this.store.get(key)) throw new Error('This extraction request was already attempted')
+    const service = this.ctx.get('evolveReflect')
+    if (!service?.analyzeTicket) throw new Error('Evolution analysis service is unavailable')
+    // Persist before the model call: a transport retry must not bill the model again.
+    this.store.set(key, { status: 'started', at: new Date().toISOString() })
+    try {
+      const result = await service.analyzeTicket({ ticketId, sessionId, by: 'executor', outcome: source.outcome, at: new Date().toISOString() })
+      this.store.set(key, { status: 'finished', result, at: new Date().toISOString() })
+      return result
+    } catch (error) {
+      this.store.set(key, { status: 'failed', at: new Date().toISOString() })
+      throw error
+    }
+  }
   /** Explicit operator maintenance only; intentionally absent from HTTP and model tools. */
   async migrateHistoricalTicketSources(request: HistoryMigrationRequest): Promise<unknown> {
     if (typeof request.dryRun !== 'boolean') throw new Error('Historical migration requires explicit dryRun')
@@ -275,6 +295,7 @@ export class Runtime extends Service implements SourceHost {
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+        analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
@@ -484,6 +505,8 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks,
+      resolveTicketAnalysisSource: input => runtime.resolveTicketAnalysisSource(input),
+      extractTicketExperience: (id, requestId) => runtime.extractTicketExperience(id, requestId),
       context: kind => runtime.context(kind),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },

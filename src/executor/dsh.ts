@@ -89,6 +89,8 @@ export interface ExecutorHost {
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'workspaceMode' | 'sourceRoot'>
+  /** Effective project authority includes saved deployment overrides, not just mount-time fields. */
+  analysisProjectRoot?(): string | undefined
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -528,10 +530,11 @@ export class DshExecutor implements Executor {
     const header = agent.session.header
     const samePath = (a: string, b: string) => process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
     if (header?.cwd && !samePath(header.cwd, workspace)) throw new PrepareFailed('Resolved worker Session belongs to another workspace')
-    if (this.host.machine.sourceRoot && header?.cwd && !header.parentSession && !header.isSeeded) this.host.store.atomic(() => {
+    const projectRoot = this.host.analysisProjectRoot?.() ?? this.host.machine.sourceRoot
+    if (projectRoot && header?.cwd && !header.parentSession && !header.isSeeded) this.host.store.atomic(() => {
       const stored = this.host.store.tickets.get(ticket.id)
       if (!stored?.execution || latestAssignment(stored)?.id !== assignment.id) return
-      stored.execution.workerBinding = { sessionId, projectRoot: this.host.machine.sourceRoot!, workspaceRoot: workspace }
+      stored.execution.workerBinding = { sessionId, projectRoot, workspaceRoot: workspace }
       this.host.store.tickets.save(stored)
     })
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
