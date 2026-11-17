@@ -8,6 +8,7 @@ import type { Ticket } from '../src/core/model.ts'
 import { captureWorkflow, observeWorkflow, workflowReason, WorkflowPolicySchema, type WorkflowSnapshot } from '../src/app/workflow-validation.ts'
 import { lifecycleHarness } from './fixtures/lifecycle-harness.ts'
 import { startRuntime, feishu } from './fixtures/host.ts'
+import { createValidationContract, runValidation } from '../src/validation.ts'
 
 vi.setConfig({ testTimeout: 90_000 })
 const roots: string[] = []
@@ -66,6 +67,50 @@ describe('host workflow evidence', () => {
       await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done' })
       expect(h.runtime.store.tickets.get(ticket.id)!.ended?.outcome).toBe('completed')
     } finally { await h.stop() }
+  })
+  it('requires related CQTest evidence for committed game code, rejects missing/wrong/stale reports and accepts bound evidence', async () => {
+    const { root, ticket, snapshot } = repository()
+    snapshot.policy.cqtestPaths = ['Source/', 'Plugins/']
+    ticket.assignments = [{ id: 'a1', startedAt: new Date(Date.now() - 60_000).toISOString() }] as Ticket['assignments']
+    mkdirSync(path.join(root, 'Source'))
+    writeFileSync(path.join(root, 'Source/A.cpp'), 'int a;')
+    git(root, 'add', 'Source'); git(root, 'commit', '-m', 'game code')
+    expect(workflowReason(ticket)).toContain('related test contract required')
+    const trusted = scratch(); const executable = path.join(trusted, 'validator.py'); writeFileSync(executable, '# validator')
+    const contract = createValidationContract({ adapter: 'cqtest-report', executable, workspace: root, requiredTestIds: ['TP.Related'], revision: 'r1' })
+    ticket.validation = { enabled: true, contract }
+    expect(workflowReason(ticket)).toContain('passing regression report evidence required')
+    const binding = { ticketId: 't1', assignmentId: 'a1', workspace: root, contractRevision: 'r1', assignmentStartedAt: ticket.assignments[0]!.startedAt! }
+    ticket.id = 't1'
+    ticket.validation.evidence = await runValidation(contract, binding)
+    expect(workflowReason(ticket)).toContain('did not pass')
+    const reportDir = path.join(root, 'Saved/Automation/TestReport'); mkdirSync(reportDir, { recursive: true })
+    writeFileSync(path.join(root, '.gitignore'), 'Saved/\n')
+    writeFileSync(path.join(root, 'TP.uproject'), '{}')
+    const save = (id: string) => writeFileSync(path.join(reportDir, 'index.json'), JSON.stringify({
+      reportCreatedOn: new Date().toISOString().slice(0, 19).replace(/-/g, '.').replace('T', '-').replace(/:/g, '.'),
+      succeeded: 1, tests: [{ fullTestPath: id, state: 'Success', errors: 0 }],
+    }))
+    save('TP.Unrelated')
+    ticket.validation.evidence = await runValidation(contract, binding)
+    expect(workflowReason(ticket)).toContain('did not pass')
+    save('TP.Related')
+    ticket.validation.evidence = await runValidation(contract, binding)
+    expect(workflowReason(ticket)).toBeUndefined()
+    writeFileSync(path.join(root, 'Source/A.cpp'), 'int changed;')
+    expect(workflowReason(ticket)).toContain('stale')
+    // A different report cannot replace the one whose digest the host recorded.
+    ticket.validation.evidence = await runValidation(contract, binding)
+    save('TP.Other')
+    expect(workflowReason(ticket)).toContain('report changed')
+  })
+  it('does not require CQTest for tooling-only code or non-code game files', () => {
+    const { root, ticket, snapshot } = repository()
+    snapshot.policy.cqtestPaths = ['Source/']
+    mkdirSync(path.join(root, 'Source')); writeFileSync(path.join(root, 'Source/readme.md'), 'docs')
+    expect(workflowReason(ticket)).toBeUndefined()
+    writeFileSync(path.join(root, 'unrelated.ts'), 'tooling')
+    expect(workflowReason(ticket)).toBeUndefined()
   })
   it('has no extra contract without a policy and rejects malformed/path-escaping policies', () => {
     expect(captureWorkflow(scratch(), scratch())).toBeUndefined()

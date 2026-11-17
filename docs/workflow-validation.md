@@ -30,6 +30,14 @@ Only paired `tool/call` + non-error `tool/result` events from the ticket's own S
 
 The ready-report guard (including `completion: implementation`) and completion/PR-close guard refuse with the rule ID, triggering file/task, and missing rule/skill. Blocked/progress reports and explicit human stops remain available. Existing publication, editor locks, review, design and test gates are unchanged.
 
+## Code regression report gate
+
+`cqtestPaths` optionally names project-owned game code prefixes. TP configures `Source/` and `Plugins/`; C/C++ headers/sources and C# build rules (`c/cpp/cc/cxx/h/hpp/inl/cs`) trigger the gate, including deletions, untracked files and committed changes in nested repositories. Tooling (`.dsh/`, build scripts), documentation and assets do not require Unreal CQTest merely because they changed; use their affected tooling tests instead.
+
+For a matching delivered change, completion (including `completion: implementation`) requires a host-management-configured CQTest contract with related `requiredTestIds`, followed by the existing `tp-autotest` run and `orchestrator_run_tests` report validation. Missing contracts fail closed rather than treating an arbitrary green test as relevant. Operators select related exact IDs through the existing validation management API; the worker cannot redefine required cases via its report. This deliberately reuses the existing contract/evidence validator: current ticket/assignment/workspace binding, report freshness and digest, passing required cases and source fingerprint. Changing code or replacing the report invalidates evidence. Configuring relevance remains a trusted operator responsibility, not a claim made by this guard.
+
+Existing frozen snapshots without `cqtestPaths` retain their previous contract. Activation requires policy publication and an authorized build/deployment/restart; this change does not itself authorize a shared-host restart.
+
 ## Regression
 
 `pnpm exec vitest run tests/workflow-validation.spec.ts` exercises real temporary Git repositories: committed/shell/untracked changes, ignored nested repositories, submodules, no-change review matching, full/partial/stale/error loading evidence, and atomic Engine completion refusal/recovery. It never starts Unreal or mutates production state. Run typecheck and build as separate checks.

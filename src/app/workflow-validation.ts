@@ -7,6 +7,8 @@ import path from 'node:path'
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Ticket } from '../core/model.ts'
+import { assertValidationEvidence } from '../validation.ts'
+import { validationBinding } from '../core/validation.ts'
 
 const relative = z.string().min(1).refine(value => !path.isAbsolute(value) && !value.includes('\\')
   && !value.split('/').includes('..') && !value.includes(':'), 'Use a workspace-relative forward-slash path')
@@ -21,6 +23,8 @@ export const WorkflowPolicySchema = z.object({
   version: z.literal(1),
   repositories: z.array(relative).default([]),
   rules: z.array(Rule),
+  /** Project-owned code prefixes requiring a host-configured related CQTest contract. */
+  cqtestPaths: z.array(relative).default([]),
 }).strict()
 export type WorkflowPolicy = z.infer<typeof WorkflowPolicySchema>
 export interface WorkflowSnapshot {
@@ -112,6 +116,17 @@ export function workflowReason(ticket: Ticket, run: WorkflowGit = git): string |
       const files = run(directory, ['diff', '--name-only', '--no-renames', '-z', repo.head, '--'])
         + run(directory, ['ls-files', '--others', '--exclude-standard', '-z'])
       for (const file of files.split('\0').filter(Boolean)) changed.add(slash(path.join(repo.root, file)))
+    }
+    const code = [...changed].find(file => /\.(?:cpp|c|cc|cxx|h|hpp|inl|cs)$/i.test(file) && snapshot.policy.cqtestPaths?.some(prefix =>
+      file === prefix || file.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`)))
+    if (code) {
+      // Never infer relevance from an arbitrary green report or a worker's summary. The existing
+      // management-only contract names the related test IDs; reuse its binding/freshness/digest gate.
+      const validation = ticket.validation
+      if (!validation?.contract) return `Workflow CQTest (${code}): related test contract required; configure requiredTestIds through host management, run tp-autotest and record the report with orchestrator_run_tests`
+      if (validation.running || !validation.evidence) return `Workflow CQTest (${code}): passing regression report evidence required; run tp-autotest then orchestrator_run_tests`
+      try { assertValidationEvidence(validation.contract, validationBinding(ticket), validation.evidence) }
+      catch (error) { return `Workflow CQTest (${code}): ${String(error)}` }
     }
     const task = `${ticket.title}\n${ticket.mandate.scope}\n${ticket.execution!.assignment}`.toLowerCase()
     const missing: string[] = []
