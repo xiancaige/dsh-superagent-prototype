@@ -23,6 +23,8 @@ export interface ExecutorToolsHost {
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
   sendReplies(): Promise<void>
+  /** Sends an idempotent IM notice when a worker reports `blocked` on an environment/editor lock without `human_action`. */
+  notifyBlockedLock?(ticket: Ticket, summary: string): boolean
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
@@ -45,7 +47,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
     }),
     tool({
       name: 'orchestrator_acquire_editor',
-      description: 'Take the exclusive TP editor lock before starting the editor, PIE, CQTest or the TPMcp port; fails naming the holder, so keep working on files and ask later. Not needed to edit, commit or push.',
+      description: 'Take the exclusive TP editor lock before starting the editor, PIE, CQTest or the TPMcp port; fails naming the holder (notifies IM), so keep working on files or pass human_action when blocked. Not needed to edit, commit or push.',
       schema: z.object({}).strict(),
       execute: async () => {
         if (!host.engine.acquireEditor) throw new Error('Editor lock unavailable')
@@ -162,11 +164,16 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const updated = host.engine.report(ticketId, report)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
+          const lockNotified = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention
+            ? host.notifyBlockedLock?.(updated, args.summary) ?? false : false
           const notification = relay ? 'orchestrator' : 'internal_only'
           const unanswered = notification === 'internal_only' && host.store.triggers
             ? unrespondedHumanFollowups(updated, host.store.triggers, activeAssignment(updated)?.idleAt ?? '') : []
+          const missingAttentionWarning = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention && !lockNotified
+            ? { warning: 'blocked without human_action or reply_to_trigger_id is NOT sent to IM/Feishu; pass human_action if human action is needed.' } : {}
           return {
-            reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}),
+            reported: true, notification, ...(lockNotified ? { lock_notification: 'queued' } : {}), ...(updated.attention ? { attention: updated.attention } : {}),
+            ...missingAttentionWarning,
             ...(unanswered.length ? {
               unanswered_human_triggers: unanswered.map(id => ({
                 trigger_id: id, preview: host.store.triggers!.get(id)?.text.replace(/\s+/g, ' ').slice(0, 80) ?? '',

@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -34,7 +34,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { eventNotice, followupNotice } from './notices.ts'
+import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Mirror } from './mirror.ts'
@@ -353,9 +353,17 @@ export class Runtime extends Service implements SourceHost {
             if (environment) void recovery.adapter.cleanup(event.data.ticketId, environment)
               .catch(error => ctx.logger.warn('dsh-superagent: TP editor cleanup failed: %s', String(error)))
           }
-          // Phase 2 C: a ticket that took the environment notes it, so an operator sees who holds it.
+          // Phase 2 C: a ticket refused the environment notifies its IM channels (e.g. Feishu) as well as logging.
           if (event.type === 'ticket.exclusive' && event.data.action === 'refused') {
             ctx.logger.warn('dsh-superagent: ticket %s did not get the TP environment: %s', event.data.ticketId, String(event.data.reason))
+            const blocked = store.tickets.get(event.data.ticketId)
+            if (blocked && setup.configured()) {
+              const request = store.triggers.get(blocked.origin.triggerId)?.text ?? blocked.title
+              const assignmentId = latestAssignment(blocked)?.id
+              for (const message of environmentLockNotices(blocked, request, String(event.data.reason ?? ''), {
+                assignmentId, ...event.data.holder ? { holder: event.data.holder } : {},
+              })) outbox.send(message)
+            }
           }
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
@@ -389,6 +397,14 @@ export class Runtime extends Service implements SourceHost {
         deliveryEnabled: process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1',
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
+        notifyBlockedLock: (blocked, summary) => {
+          if (!setup.configured() || !isEnvironmentLockSummary(summary)) return false
+          const request = store.triggers.get(blocked.origin.triggerId)?.text ?? blocked.title
+          const assignmentId = latestAssignment(blocked)?.id
+          const messages = environmentLockNotices(blocked, request, summary, { assignmentId })
+          for (const message of messages) outbox.send(message)
+          return messages.length > 0
+        },
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
