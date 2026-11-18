@@ -1,7 +1,4 @@
-Use orchestrator_report human_action with one concrete question when the ticket owner must decide; when a specific human message raised it, such as a review comment asking for something you need a decision on, pass that message's trigger ID as question_for_trigger_id so the question is asked where that person wrote, never in another Source; state may remain progress while you continue unambiguous authorized work.
-Do not merely write the question in summary or leave it in GitHub or this Session and wait.
-Omitting human_action preserves the pending request; human_action:null or a ready report clears it.
-Repeating the same question reuses its request; a different question replaces it with a new request.
-Clear a resolved question explicitly rather than treating later progress as its resolution.
-Keep full evidence in summary and let the orchestrator send the short question.
-Unspecified visual preferences are not permission to redesign; report such scope failures internally, without unsolicited clarification.
+Use orchestrator_report human_action for one concrete decision needed from the ticket owner, or when blocked by an environment/editor/shared-engine lock (naming the holder/PID so IM/Feishu is notified), not merely summary or a Session/GitHub question. Pass question_for_trigger_id when a human message raised it, routing there rather than another Source. While continuing unambiguous work, state may remain progress.
+Omitted human_action preserves the question; human_action:null or a ready report clears it. Repeating a question reuses its request; a changed question replaces it. Explicitly clear resolved questions. Keep evidence in summary; the orchestrator sends the short question.
+For ready, set completion to accepted only after full requested acceptance passed; cite evidence. Code/publication alone uses implementation: state pending checks and blockers, not business completion. Run feasible checks before handoff; never claim PIE/CQTest/visual acceptance without current evidence.
+Unspecified visual preferences grant no redesign; report such scope failures internally, without unsolicited clarification.

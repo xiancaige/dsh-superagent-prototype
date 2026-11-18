@@ -216,6 +216,21 @@ beforeEach(async () => {
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
 
+it('starts candidate timing on the master consumption event, not inbox delivery', async () => {
+  const trigger = feishu('timing', '请修复回归')
+  await receive(trigger)
+  const thread = () => runtime.store.threads.get(threadKey(trigger.threads[0]!))!
+  expect(thread().evaluating!.delivered).toBeUndefined()
+  const agent = agents.get(runtime.masterId)!
+  const message = agent.inbox.nextStep.find(message => JSON.parse(message.content[0]!.type === 'text' ? message.content[0]!.text : '{}').kind === 'candidate')!
+  expect(message).toBeDefined()
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  ctx.emit('session/event', { id: 'another-session' } as never, { type: 'user/message', seq: 1, time: Date.now(), data: message } as never)
+  expect(thread().evaluating!.delivered).toBeUndefined()
+  ctx.emit('session/event', { id: runtime.masterId } as never, { type: 'user/message', seq: 2, time: Date.now(), data: message } as never)
+  expect(thread().evaluating!.delivered).toBeDefined()
+})
+
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
   const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
@@ -397,7 +412,7 @@ it('stops a ticket on a person\'s instruction for good, and resumes an ended one
   const other = await acceptedTicket(feishu('20', '@bot 修另一个'))
   await runTool(other.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'not reproduced' })
   expect(runtime.store.tickets.get(other.ticket.id)!.ended).toBeDefined()
-  await receive(feishu('21', '我这边还能复现', { mentions: [], root_id: 'om_20', sender_id: 'ou_guest' }))
+  await receive(feishu('21', `工单 ${other.ticket.id} 我这边还能复现`, { mentions: [], root_id: 'om_20', sender_id: 'ou_guest' }))
   await runtime.pump()
   const resumed = runtime.store.tickets.get(other.ticket.id)!
   expect(resumed.ended).toBeUndefined()
@@ -1269,7 +1284,10 @@ it('resumes several ended tickets on one thread from one message without the lau
   await runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: another.id, reason: 'Another change.' })
   const second = await acceptedTicket(another)
   for (const ticket of [first, second]) await runTool(ticket.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'nothing to do' })
-  await receive(feishu('32', '还有问题', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
+  await receive(feishu('32', '测试', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
+  expect([first, second].every(ticket => !!runtime.store.tickets.get(ticket.ticket.id)!.ended)).toBe(true)
+  await receive(feishu('33', `继续 ${first.ticket.id}`, { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
+  await receive(feishu('34', `继续 ${second.ticket.id}`, { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
   await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.ended)).toEqual([undefined, undefined]), { timeout: 3000 })
   await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.assignments.at(-1)!.state)).toEqual(['running', 'running']), { timeout: 3000 })
 })
@@ -1277,7 +1295,7 @@ it('resumes several ended tickets on one thread from one message without the lau
 it('attaches a message to an ended ticket and so resumes it', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'nothing to do' })
-  const other = feishu('40', '@bot 上次那个改动还要改一下', { root_id: undefined })
+  const other = feishu('40', `@bot 工单 ${ticket.id} 上次那个改动还要改一下`, { root_id: undefined })
   await receive(other)
   await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: other.id })
   await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined())

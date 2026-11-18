@@ -66,7 +66,7 @@ export class Replies extends EnginePart {
     const trigger = request.triggerId ? this.repo.triggers.get(request.triggerId) : undefined
     if (request.triggerId && !trigger) throw new UserError('unknownTrigger')
     const ticket = request.ticketId ? this.require(request.ticketId)
-      : trigger ? this.repo.tickets.list().find(item => this.reaches(item, trigger)) : undefined
+      : trigger ? this.ownedTicket(trigger, request.purpose) : undefined
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
       const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
@@ -100,4 +100,15 @@ export class Replies extends EnginePart {
   }
   /** The conversation a ticket started in: its origin Trigger's Channel, else its first Channel. */
   private sourceChannel(ticket: Ticket): ChannelRef | undefined { return this.source(ticket)?.channel ?? ticket.channels[0] }
+  /**
+   * Resolves the ticket owning `trigger` when `ticketId` is omitted: for `answer`, only a ticket that answered it,
+   * currently decides it (`owners`), or is live and started from it (ignoring ended/stopped/context/handed-back links).
+   */
+  private ownedTicket(trigger: Trigger, purpose: Exclude<ReplyRequest['purpose'], 'acknowledgement'>): Ticket | undefined {
+    const tickets = this.repo.tickets.list()
+    if (purpose !== 'answer') return tickets.find(item => this.reaches(item, trigger, false))
+    const owners = new Set(this.owners(trigger))
+    return tickets.find(item => item.answers?.includes(trigger.id))
+      ?? tickets.find(item => owners.has(item.id) || (liveTicket(item) && item.origin.triggerId === trigger.id))
+  }
 }

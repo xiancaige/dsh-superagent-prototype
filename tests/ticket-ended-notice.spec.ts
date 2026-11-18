@@ -45,6 +45,27 @@ it('the real Runtime routes a committed worker completion to evolution without a
   } finally { await h.stop() }
 })
 
+it('maintenance refuses unbound sources and bills an authorized request only once', async () => {
+  const h = await startRuntime()
+  const analyze = vi.fn(async () => ({ ok: true, status: 'completed', jobId: 'maintenance-job' }))
+  h.ctx.provide('evolveReflect', { analyzeTicket: analyze })
+  try {
+    const { ticket, sessionId } = await h.acceptedTicket(feishu('maintenance', 'Check source'))
+    await expect(h.runtime.extractTicketExperience(ticket.id, 'once')).rejects.toThrow('authorized')
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
+    await h.runtime.idle()
+    const stored = h.runtime.store.tickets.get(ticket.id)!
+    stored.execution!.workerBinding = { sessionId, projectRoot: '/project', workspaceRoot: stored.execution!.directory }
+    h.runtime.store.tickets.save(stored)
+    analyze.mockClear()
+    const original = h.runtime.store.get(KV.runtime.ticketAnalysis(ticket.id))
+    expect(await h.runtime.extractTicketExperience(ticket.id, 'once')).toMatchObject({ jobId: 'maintenance-job' })
+    await expect(h.runtime.extractTicketExperience(ticket.id, 'once')).rejects.toThrow('already attempted')
+    expect(analyze).toHaveBeenCalledTimes(1)
+    expect(h.runtime.store.get(KV.runtime.ticketAnalysis(ticket.id))).toEqual(original)
+  } finally { await h.stop() }
+})
+
 it('calls one named service after commit and stores the actual result', async () => {
   const f = fixture(), analyze = vi.fn(async () => ({ ok: true, jobId: 'j1', status: 'completed' }))
   f.service(analyze)

@@ -141,6 +141,8 @@ export function TicketPage({ id }: { id: string }) {
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
     </div>
     {ended && <Hint>{ended}</Hint>}
+    {data.acceptancePending && <p className="dt-banner"><span className="dt-banner-label">{t('acceptancePending')}</span>{data.summary}</p>}
+    {data.modelFailure && <Hint>{t('modelFailureBudget', { budget: data.modelFailure.hostResumeBudget })}</Hint>}
     {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
       text={data.attention.question} />
       {channel && <div className="dt-banner-actions">

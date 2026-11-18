@@ -293,6 +293,8 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET tickets/:id/experience': { answer: () => ({ authorized: false }) },
+  'POST tickets/:id/experience': { body: true, answer: () => ({ ok: false, reason: 'out-of-scope' }) },
   'PUT source:wecom/secret': { body: true, answer: ({ body }) => ({ saved: true, variable: body.variable, file: `/tmp/secrets.env` }) },
   'POST local/messages': { body: true, answer: ({ body }) => ({ id: body.id, thread: body.thread ?? body.id, triggerId: `local:message:${body.id}`, result: 'stored' }) },
   'GET local/messages': { query: ['thread'], answer: ({ query }) => ({ thread: query.thread ?? '', messages: [] }) },

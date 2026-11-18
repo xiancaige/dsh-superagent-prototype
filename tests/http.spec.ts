@@ -51,6 +51,22 @@ it('guards local intake, validates input, reports retry conflicts and reads its 
   expect(await call('POST', 'local/messages', body)).toMatchObject({ status: 404 })
 })
 
+it('gates maintenance extraction behind management origin and strict explicit LLM input', async () => {
+  const calls: unknown[] = []
+  const call = serve({ store: { tickets: { get: (id: string) => id === 't1' ? { id } : undefined } },
+    resolveTicketAnalysisSource: () => undefined,
+    extractTicketExperience: async (...args: unknown[]) => { calls.push(args); return { ok: true, jobId: 'actual-job' } } })
+  expect(await call('GET', 'tickets/t1/experience')).toMatchObject({ body: { authorized: false } })
+  const valid = { requestId: 'once', confirmLlm: true }
+  expect(await call('POST', 'tickets/t1/experience', valid, { origin: 'http://evil' })).toMatchObject({ status: 403 })
+  for (const body of [{ requestId: 'once' }, { ...valid, workspaceRoot: '/forged' }, { ...valid, confirmLlm: false }]) {
+    expect(await call('POST', 'tickets/t1/experience', body)).toMatchObject({ status: 400 })
+  }
+  expect(calls).toEqual([])
+  expect(await call('POST', 'tickets/t1/experience', valid)).toMatchObject({ status: 200, body: { jobId: 'actual-job' } })
+  expect(calls).toEqual([['t1', 'once']])
+})
+
 it('configures strict acceptance only through explicit management schema and exposes host evidence', async () => {
   const calls: unknown[] = []
   const validation = { enabled: true as const, contract: { revision: 'r1' } }

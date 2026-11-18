@@ -1,37 +1,8 @@
-For every ticket that changes UI, the PR description must contain BOTH Before and After visual evidence, clearly labelled, with the baseline and changed revision identified.
-Capture the same scenario, viewport, theme and relevant UI state so the comparison is meaningful; screenshots or demonstrations are acceptable.
-After-only evidence is incomplete.
-Use actual application captures, not a mockup presented as the previous implementation, and do not expose private Feishu content or credentials.
-Refresh the comparison when later UI changes make it stale.
-If a real baseline capture is unavailable, state the missing evidence and limitation honestly, keep the handoff incomplete, and do not claim the UI PR is ready.
-Workers capture and verify the comparison; the orchestrator checks the reported evidence before delivering a ready result.
+保持 local 执行，无 GitHub Source。每张工单在自己的 git worktree（分支 agent/<name>）里实施，只有启动编辑器（PIE/CQTest/TPMcp）前才调用 orchestrator_acquire_editor 取编辑器锁，用完先自行关闭你启动的编辑器，再调用 orchestrator_release_editor。有本工单代码或配置改动时，完成必须提交（AIAgent / AI提交）、rebase 到最新 origin/main 并推送到远端（push origin HEAD:main，禁 --force；涉及 .dsh 子模块先在子模块内提交推送，再提交推送 TP 的子模块指针），由宿主校验交付。只读调查以所请求的结论及证据为交付物，不要求制造改动、空提交、PR、游戏编译或无关的 GitHub CLI 检查；宿主实际强制的校验仍不得跳过。启用 finalizeWorktrees 后，由宿主在工单验收完成、worker 空闲且编辑器释放后实时复核远端，将源空间 fast-forward 到 origin/main，递归对齐子模块，再回收本工单 worktree；失败保留空间并在 finalize effect 健康状态记录错误。worker 不自行删除工作目录，不把 ready 当作回收成功；源空间脏、分叉、远端不可达或未包含成果时停止回收，不 reset/stash/clean。未启用则保留工单空间。不创建 PR；普通 Git 推送是上述已授权交付步骤。涉及运行时插件的构建、部署到当前加载路径及 DSH 重启，仅在原始工单或操作者明确授权时执行，不继承旧的 local-only 禁令，也不自动授权其他工单中断宿主。必须实际执行所需验证；严格验收逐工单由宿主配置，未启用不能宣称通过严格门禁。失败或未运行如实报告，ready不是独立审查或完整TP交付的替代。包或产品发布默认不授权；白名单操作者在原始请求或本工单后续消息中明确要求打包并上传 Steam 时，该请求即授予本工单对应产品、目标平台及请求范围内的打包上传权限，不得再以 local 模式或默认未授权为由拒绝，也不重复索要同一授权。仅请求打包不授权上传，仅请求修复发布授权问题不授权实际发布；不得扩大到其他产品、平台、分支或公开上线。仍须执行项目发布流程与所需验证；缺少凭据、平台权限、目标信息或验证失败时如实报告具体阻塞，不得绕过安全门禁或声称已上传。
+关闭校验失败不等于业务调查未完成。保留业务结果，读取实际拒绝原因，区分脏工作区、未发布提交、本地远端跟踪引用过期、远端不可达及严格验收失败。detached submodule HEAD 本身不是未发布的证据。可在授权范围内通过普通 git fetch origin 刷新有关仓库的远端跟踪引用并核验提交可达性；不 checkout/reset/clean，不改子模块指针，不强推、不制造提交、更不降低门禁。同一失败最多进行一次针对性修复和一次重试；仍失败时报告具体门禁阻塞、已完成成果及所需维护动作，不重复执行已完成调查，也不无限提交相同 ready。
 
-TP local development ticket (this deployment runs in the TP project root as the source workspace): commit locally, never push.
-Before reporting ready or blocked, commit the ticket's own changed files locally with `git add -- <the ticket's files>` only, never `git add -A`, `git stash`, `git reset` or `git clean`; commit as `git -c user.name="AIAgent" -c user.email="aiagent@tp.local" commit` and leave every earlier change alone. Do not push, open a PR, publish, install into the running profile or restart the host.
-A ready report without a local commit is an incomplete draft: report blocked with the commit failure that stopped it.
-Run the targeted tests and typecheck, C++ through the project compile and restart verification, and report real commands, results, file diff and limitations.
-Test level follows the ticket's deliverable: a ticket that packages, Cooks or uploads a game build must also run the packaged-game CQTest (`BuildScripts/run-cqtest.bat package <filter> [timeout]` on a packaged build) and report its result before that build is packed or uploaded; when the ticket only changes source and packages nothing, PIE CQTest (`BuildScripts/run-cqtest.bat pie <filter>`) is enough and no packaged build or package-mode test is required.
-Record progress as you go, not only at the end, so a later worker or a person can continue after a failure, a quota stop or a restart.
-Create the ticket's plan/TODO detail document (for example `.dsh/plugins/tp-planboard/data/todo/<name>.md` and its `.dsh/plugins/tp-planboard/data/TODO.md` index line) only when the work does not finish in one pass: it fails or is blocked, or it must pause before a long compile/test phase or at a wait on a decision. Keep that record current with what is done, the evidence for each verified item, what remains and the next step. Mark a plan/TODO item done only when the assignment authorizes it; an interrupted or blocked assignment leaves that record behind and never deletes it.
-When the work completes in one pass and the ticket's report, commit and checks already carry the evidence, create no plan/TODO detail document for it and add no index line.
+<!-- tp-release-routing:start -->
+打包发布任务：worker 在任何构建/恢复/上传操作前必须加载项目 ue-build-deploy Skill，按其源工程持锁流程及 build-recovery 参考执行；项目源工程仅允许通过该流程同步和执行，不在其中开发。主调度只按原始授权分流，不代替 worker 设计方案或向路由备注追加清单；交付时核对 worker 报告是否包含对应阶段的本次证据，不自行重跑或读取技术日志调查。仅打包任务以完整 BuildCookRun 最终退出码和真实产物为准；已授权上传 Steam 的任务还须在上传前通过泄漏审计、L3 冒烟、L2 打包测试，并报告每个目标 AppID 的本次 BuildID；编译成功、旧报告或 Steamcmd 泛化 success 均不能代替。引擎路径/缓存异常不得临时写死 uproject、绕过共享 resolver/PCH 预检或跳过失败阶段；共享引擎缓存隔离须有覆盖具体路径与清单的明确授权，持锁本身不授予移动权限。长任务只保留一个后台作业，等待完成通知，不重复启动、短间隔轮询或反复播报计数。失败保留已验证成果与具体阻塞，不把修复请求扩大为上传授权；尚未核验 Steamworks 分支或客户端下载时必须明确说明。
+<!-- tp-release-routing:end -->
 
-Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.
-Never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
-When this section names no merge CLI, a person merges every PR.
-With a merge CLI, enable auto-merge for the head commit of a PR you opened from the ticket branch once all of these hold: the PR is ready; it changes fewer than 200 lines (additions plus deletions); each approval those instructions require covers that commit; and if it changes what users see, those instructions name who approves such changes and that approval covers the commit.
-Report ready without waiting for approvals, and enable auto-merge when they arrive.
-Otherwise a person merges the PR; say so in your report.
-Withdraw auto-merge with `<merge CLI> pr merge <number> --disable-auto --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY` as soon as any of these stops holding, such as when a review requests changes, and before you push to the PR; enable it again once they hold for the new head.
-Never approve or merge on behalf of a reviewer.
-Credit each person who reviews a PR you opened, once per PR, on every commit of the PR branch: when a human reviewer's feedback on it is first assessed, rewrite the branch so each of its commits carries one `Co-authored-by: <name or login> <id+login@users.noreply.github.com>` trailer per person credited so far, with the id from `gh api users/<login> --jq .id`.
-Withdraw auto-merge first as above.
-Run `git fetch origin`, set `base=$(git merge-base HEAD origin/<base branch>)` with the base branch from `gh pr view <number> --json baseRefName` and `old=$(git rev-parse origin/<head branch>)`, then run `FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter 'git interpret-trailers --if-exists addIfDifferent --trailer "<trailer>"' $base..HEAD` with one `--trailer` per person credited, which changes only commit messages, and push with `git push --force-with-lease=<head branch>:$old`; if the push is rejected, stop and report.
-Commits you add later carry the same trailers.
-An approval of a commit also covers its rewritten copy, which has the same tree.
-If the PR has merged, do not rewrite it; record the uncredited reviewer in orchestrator_report.
-Never push an empty commit to credit a reviewer.
-Do not credit bots (logins ending in [bot] and the accounts these instructions name as review bots), the PR's author, the agent account, or the person these instructions name as commit author, who is already credited as the author of every commit.
-Record whom you have credited in orchestrator_report, so a later worker does not credit them again.
-If a human is working on the same problem and their branch or PR contains this ticket's code (commits from the ticket branch, or its changes carried over), close this ticket's PR with gh immediately without asking anyone, leaving one sentence on it that names the human's PR.
-Work that is only related, or does not contain the ticket's code, is not a reason to close.
-Closing the PR ends the ticket; send no other message.
+验证按本单交付物和宿主实际配置的合同执行；纯工具链单不额外启动编辑器或请求 CQTest，不得跳过已配置的强制门禁。分别报告实现、发布、加载与业务验收的本次证据；编译、健康状态、记录条数不能代替对应验收。

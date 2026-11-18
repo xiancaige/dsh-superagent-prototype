@@ -1,7 +1,8 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { followupOwners, key, liveTicket, type DomainEvent, type OutboundMessage, type Ticket, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
+import { IM_WORDS, imSummary } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
 import type { Store } from './store.ts'
@@ -126,4 +127,42 @@ export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' |
   }
   if (report.state === 'progress' && !report.answers) return undefined
   return resultRelay(ticket, report.state, report.summary, report.answers)
+}
+
+const ENV_LOCK_PATTERN = /(?:\bEnvironmentHeld(?:BySelf)?\b|\btp-environment\.lock\b|\bTPCompileRestart\.lock\b|TP environment is held by|环境锁|共享引擎.*?(?:占用|锁)|编译流程被占用|编辑器(?:进程)?.*?占用|\beditor lock\b)/i
+/** Whether a worker's `blocked` summary describes an environment, editor, or shared-engine lock block. */
+export function isEnvironmentLockSummary(summary: string): boolean {
+  return ENV_LOCK_PATTERN.test(summary)
+}
+const chineseRequest = (request: string, reason: string): boolean =>
+  (/\p{Script=Han}/u.test(request) && !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(request))
+  || /\p{Script=Han}/u.test(reason)
+function formatLockReason(reason: string, chinese: boolean): string {
+  const cleaned = reason.replace(/^(?:TP environment block:\s*|Waiting for the TP environment:\s*|EnvironmentHeld(?:BySelf)?:\s*)+/i, '').trim()
+  const held = /TP environment is held by (\S+) (.*?) \(Session pid (\d+)\) since ([^;]+)/i.exec(cleaned)
+  if (held) {
+    const [, kind, label, pid, since] = held
+    const kindZh = kind === 'ticket' ? '工单' : kind === 'session' ? '会话' : kind!
+    return chinese ? `当前由${kindZh} ${label}（PID ${pid}）自 ${since} 起持有` : `held by ${kind} ${label} (pid ${pid}) since ${since}`
+  }
+  return cleaned || (chinese ? '共享环境或编辑器正在被占用' : 'the shared environment or editor is currently occupied')
+}
+/**
+ * Builds idempotent IM notices when a ticket is blocked or refused by an environment/editor/compile lock.
+ * Keeps messages concise within `IM_WORDS` so Feishu delivery never rejects them.
+ */
+export function environmentLockNotices(ticket: Ticket, request: string, reason: string,
+  options: { assignmentId?: string; holder?: string } = {}): OutboundMessage[] {
+  const chinese = chineseRequest(request, reason)
+  const detail = formatLockReason(reason, chinese)
+  const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 20, '…')
+  const raw = chinese
+    ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）遇到环境锁阻塞：${detail}。`
+    : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) hit an environment lock: ${detail}.`
+  const text = imSummary(raw, IM_WORDS - 5, '…')
+  const dedup = options.holder || detail.slice(0, 120)
+  return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
+    id: key('env-lock', ticket.id, options.assignmentId ?? '', dedup, channel.source, JSON.stringify(channel.address)),
+    channel, text, kind: 'notice', ticketId: ticket.id,
+  }))
 }

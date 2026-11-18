@@ -174,6 +174,11 @@ export class Sessions {
     if ('error' in result) throw result.error
     await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
   }
+  /** Whether a delivered message was consumed into history, excluding pending inboxes. */
+  async consumed(sessionId: string, requestId: string): Promise<boolean> {
+    const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
+    return !('error' in result) && await this.agentDelivery.consumed(result.agent, key(requestId))
+  }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */

@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { assertTicketDesignApproved } from '../core/design.ts'
 import { blockedForEnvironment, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
@@ -13,12 +13,13 @@ import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
+import { captureWorkflow } from '../app/workflow-validation.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
-import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import { cancelled, collectJob, hasBackgroundWork, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -27,8 +28,8 @@ export const workerSessionId = (ticketId: string): string => `worker-${ticketId}
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
-/** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
-const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
+/** Maximum transient retries before a worker session is launched; model turns own their retries. */
+const TRANSIENT_TRIES = 3
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
 const BACKGROUND_LIMIT_MS = 30 * 60_000
 /** How long a host stop waits for the workers' background work to stop. */
@@ -89,6 +90,8 @@ export interface ExecutorHost {
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'workspaceMode' | 'sourceRoot'>
+  /** Effective project authority includes saved deployment overrides, not just mount-time fields. */
+  analysisProjectRoot?(): string | undefined
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -227,6 +230,39 @@ export class WorkerSlots {
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
+/**
+ * Read human follow-up trigger IDs on `ticket` since `since` that have not yet been acknowledged,
+ * answered, asked about, or handed back. Origin triggers and context-only triggers are excluded.
+ */
+export function unrespondedHumanFollowups(ticket: Ticket, triggers: Pick<Store['triggers'], 'disposition'>, since = ''): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const input of ticket.inputs) {
+    if (input.kind !== 'trigger' || !input.human || input.context) continue
+    if (input.triggerId === ticket.origin.triggerId) continue
+    if (!input.readAt || (since && input.readAt <= since)) continue
+    if (seen.has(input.triggerId)) continue
+    seen.add(input.triggerId)
+    const disposition = triggers.disposition(input.triggerId)
+    if (disposition?.acked?.includes(ticket.id)) continue
+    if (disposition?.handbacks?.some(item => item.ticketId === ticket.id)) continue
+    if (ticket.attention?.triggerId === input.triggerId) continue
+    if (ticket.answers?.includes(input.triggerId)) continue
+    result.push(input.triggerId)
+  }
+  return result
+}
+/** Extracts the final assistant text of the latest turn (or all events when turn markers are absent in test fixtures). */
+function latestTurnText(agent: Agent): string {
+  const events = agent.session.snapshotEvents()
+  const turnAt = events.findLastIndex(event => event.type === 'turn/start')
+  const markAt = turnAt >= 0 ? turnAt : events.findLastIndex(event => event.type === 'user/message')
+  const scope = markAt >= 0 ? events.slice(markAt + 1) : events
+  const last = scope.filter(event => event.type === 'assistant/message').at(-1)
+  return last?.type === 'assistant/message'
+    ? last.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n').trim() : ''
+}
+
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -518,12 +554,31 @@ export class DshExecutor implements Executor {
       if (!current()) return
     }
     if (!current()) return
+    // Freeze source-owned policy and Git heads before the worker can act. Preserve across retries/restarts.
+    const workflowSource = this.host.analysisProjectRoot?.() ?? this.host.machine.sourceRoot
+    if (workflowSource) this.host.store.atomic(() => {
+      const stored = this.host.store.tickets.get(ticket.id)
+      if (!stored?.execution || stored.execution.workflow) return
+      const workflow = captureWorkflow(workflowSource, workspace)
+      if (workflow) { stored.execution.workflow = workflow; this.host.store.tickets.save(stored) }
+    })
     // Phase 2 C: a worker that continues (retry, resumed ticket, restart) takes the environment again, or is refused
     // naming its holder; it is never launched on an environment another ticket holds.
     this.host.engine.ensureEnvironment(ticket.id)
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker', ticket.workspaceRole)
     if (!current()) return
+    // Bind the actual host-resolved worker, not caller-supplied analysis directories.
+    const header = agent.session.header
+    const samePath = (a: string, b: string) => process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+    if (header?.cwd && !samePath(header.cwd, workspace)) throw new PrepareFailed('Resolved worker Session belongs to another workspace')
+    const projectRoot = this.host.analysisProjectRoot?.() ?? this.host.machine.sourceRoot
+    if (projectRoot && header?.cwd && !header.parentSession && !header.isSeeded) this.host.store.atomic(() => {
+      const stored = this.host.store.tickets.get(ticket.id)
+      if (!stored?.execution || latestAssignment(stored)?.id !== assignment.id) return
+      stored.execution.workerBinding = { sessionId, projectRoot, workspaceRoot: workspace }
+      this.host.store.tickets.save(stored)
+    })
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
     await this.stopped(ticket.id)
     if (!current()) return
@@ -593,8 +648,17 @@ export class DshExecutor implements Executor {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
-      if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
-      void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
+      // agent/error is terminal: the model layer already owns transport retries. Replaying a
+      // turn here silently multiplies that budget and may repeat side effects.
+      this.host.store.atomic(() => {
+        const current = this.host.store.tickets.get(ticket.id)
+        const active = current && runningAssignment(current)
+        if (!current || active?.id !== assignment.id) return
+        active.modelFailure = { at: now(), error: String(error).slice(0, 2000), hostResumeBudget: 0 }
+        this.host.store.tickets.save(current)
+      })
+      void this.background(Promise.resolve().then(() => { this.failed(ticket.id,
+        `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${String(error)}`) }))
     }))
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
@@ -691,50 +755,6 @@ export class DshExecutor implements Executor {
     this.transient.set(key, tries + 1)
     return true
   }
-  /** Schedules a worker turn retry with exponential backoff after a transient provider or network error. */
-  private resumeAfter(ticketId: string, assignmentId: string, error: unknown): void {
-    const tries = this.transient.get(assignmentId)!
-    const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). Continue the assignment where it stopped.`
-    this.resuming.add(assignmentId)
-    const go = () => {
-      if (this.host.closing()) return
-      const ticket = this.host.store.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
-      // Wait while processing is paused or no wake slot is free.
-      if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
-      const sessionId = workerSessionId(ticketId)
-      const waking = !this.running(ticket)
-      try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
-        if (!(failure instanceof Later)) throw failure
-        this.after(SLOT_WAIT_MS, go); return
-      }
-      const authorize = () => {
-        const current = this.host.store.tickets.get(ticketId)
-        if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignmentId) throw new Error('Retry assignment ended')
-        assertTicketDesignApproved(current, assignmentId)
-      }
-      try { authorize() } catch {
-        if (waking) this.slots.free(ticketId)
-        this.resuming.delete(assignmentId)
-        this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
-        return
-      }
-      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue', authorize)
-        .catch(failure => {
-          const current = this.host.store.tickets.get(ticketId)
-          if (current?.designApproval?.required) {
-            try { assertTicketDesignApproved(current, assignmentId) } catch {
-              this.host.engine.deferDesignResume(ticketId, assignmentId, `retry:${assignmentId}:${tries}`, text)
-              return
-            }
-          }
-          throw failure
-        })
-      void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
-        .catch(failure => { this.failed(ticketId, String(failure)) }))
-    }
-    this.after(TRANSIENT_BACKOFF_MS * 2 ** (tries - 1), go)
-  }
   /** Schedules `then` to run after `ms` milliseconds unless `dispose()` is called first. */
   private after(ms: number, then: () => void): void {
     const timer = setTimeout(() => { this.timers.delete(timer); then() }, ms)
@@ -789,6 +809,25 @@ export class DshExecutor implements Executor {
       this.handOff(ticket.id, agent)
       return
     }
+    // If the worker answered a read human follow-up in plain text while background work keeps running,
+    // relay it immediately with `answers` instead of holding the reply behind `untilQuiet`.
+    const left = this.left.get(ticket.id)?.jobs
+    const sinceIdle = runningAssignment(before)?.idleAt ?? ''
+    const turnText = latestTurnText(agent)
+    const pendingBefore = turnText ? unrespondedHumanFollowups(before, this.host.store.triggers, sinceIdle) : []
+    let relayedInTurn = false
+    if (pendingBefore.length && await hasBackgroundWork(this.host.context, agent, left)) {
+      if (this.host.closing() || agent.status !== 'idle') return
+      this.host.store.atomic(() => {
+        const currentBefore = live()
+        if (!currentBefore || handedOff(currentBefore)) return
+        const answerTo = unrespondedHumanFollowups(currentBefore, this.host.store.triggers, sinceIdle).at(-1)
+        if (!answerTo) return
+        const updated = this.host.engine.report(ticket.id, { state: 'progress', summary: turnText, answers: answerTo })
+        this.relay(resultRelay(updated, 'progress', turnText, answerTo))
+        relayedInTurn = true
+      })
+    }
     // Its turn ends once nothing runs for it in the background, which holds its slot meanwhile: at most for the limit from
     // this idle, and until the worker runs again or the Assignment ends.
     this.settling.get(ticket.id)?.abort()
@@ -797,7 +836,6 @@ export class DshExecutor implements Executor {
     const timer = setTimeout(() => { limit.abort() }, BACKGROUND_LIMIT_MS)
     timer.unref?.()
     let quiet: boolean
-    const left = this.left.get(ticket.id)?.jobs
     try { quiet = await untilQuiet(this.host.context, agent, AbortSignal.any([this.host.lifetime, look.signal, limit.signal]), left) }
     finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) this.settling.delete(ticket.id) }
     const current = live()
@@ -819,17 +857,17 @@ export class DshExecutor implements Executor {
     }
     // The worker may have reported while its turn ended; a blocked or failed report a person's message has lifted is stale.
     if (handedOff(current)) return
-    const last = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').at(-1)
-    const text = last?.type === 'assistant/message'
-      ? last.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n').trim() : ''
+    const text = relayedInTurn ? '' : latestTurnText(agent)
+    const answerTo = text ? unrespondedHumanFollowups(current, this.host.store.triggers, sinceIdle).at(-1) : undefined
     const said = [text, stopped].filter(Boolean).join('\n\n')
     this.host.store.atomic(() => {
       const before = latestReport(current)?.summary ?? ''
       // The turn ended without a newer question (handedOff would have returned), so an open question was answered: clear it.
-      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null })
+      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null,
+        ...(answerTo ? { answers: answerTo } : {}) })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
-      if (said) this.relay(resultRelay(updated, 'waiting', said))
-      else if (!before.trim()) {
+      if (said) this.relay(resultRelay(updated, 'waiting', said, answerTo))
+      else if (!relayedInTurn && !before.trim()) {
         this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))
       }
     })

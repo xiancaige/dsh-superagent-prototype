@@ -11,9 +11,9 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -28,12 +28,13 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
-import { installTicketAnalysis } from './ticket-analysis.ts'
+import { installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
+import { historyMigrationStore, type HistoryMigrationRequest, type HistoryMigrationService } from './history-migration.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { eventNotice, followupNotice } from './notices.ts'
+import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Mirror } from './mirror.ts'
@@ -54,6 +55,8 @@ import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } fro
 import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
 import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
 import { unpublishedReason } from './publication.ts'
+import { observeWorkflow, workflowReason } from './workflow-validation.ts'
+import { ticketOfSession } from '../executor/dsh.ts'
 import { SimulatedDelivery } from './simulated-delivery.ts'
 import { exclusivityPort, RECOVERY_HOLDER_PREFIX } from './editor-recovery-lease.ts'
 
@@ -91,6 +94,40 @@ function sleepSync(ms: number): void {
  * Locks the state directory before opening SQLite so concurrent processes cannot corrupt or double-migrate state.
  */
 export class Runtime extends Service implements SourceHost {
+  resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
+    return resolveTicketAnalysisSource(this.store, input)
+  }
+  /** Loopback management only: one explicitly requested attempt, never a history sweep. */
+  async extractTicketExperience(ticketId: string, requestId: string) {
+    const sessionId = `worker-${ticketId}`
+    const source = this.resolveTicketAnalysisSource({ ticketId, sessionId })
+    if (!source) throw new Error('Ticket has no authorized ended worker source')
+    const key = `ticket-experience-maintenance:${ticketId}:${requestId}`
+    if (this.store.get(key)) throw new Error('This extraction request was already attempted')
+    const service = this.ctx.get('evolveReflect')
+    if (!service?.analyzeTicket) throw new Error('Evolution analysis service is unavailable')
+    // Persist before the model call: a transport retry must not bill the model again.
+    this.store.set(key, { status: 'started', at: new Date().toISOString() })
+    try {
+      const result = await service.analyzeTicket({ ticketId, sessionId, by: 'executor', outcome: source.outcome, at: new Date().toISOString() })
+      this.store.set(key, { status: 'finished', result, at: new Date().toISOString() })
+      return result
+    } catch (error) {
+      this.store.set(key, { status: 'failed', at: new Date().toISOString() })
+      throw error
+    }
+  }
+  /** Explicit operator maintenance only; intentionally absent from HTTP and model tools. */
+  async migrateHistoricalTicketSources(request: HistoryMigrationRequest): Promise<unknown> {
+    if (typeof request.dryRun !== 'boolean') throw new Error('Historical migration requires explicit dryRun')
+    const service = this.ctx.get('evolveReflect') as unknown as HistoryMigrationService | undefined
+    const deployment = this.setup.deployment
+    const projectRoot = deployment.sourceRoot || (deployment.environment?.projectFile ? dirname(deployment.environment.projectFile) : undefined)
+    if (!projectRoot || !service?.migrateHistory || !service.historyStateHash) throw new Error('Historical migration service is unavailable')
+    return service.migrateHistory({ allowlist: request.ticketIds, apply: !request.dryRun, authorization: request.authorization,
+      store: historyMigrationStore(this.store, this.effects, state => service.historyStateHash(state)),
+      resolver: input => ({ ...input, projectRoot }) })
+  }
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts
@@ -260,11 +297,24 @@ export class Runtime extends Service implements SourceHost {
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+        analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'),
+        deliveryId: id => sessions.promptedId(id), consumed: id => sessions.consumed(masterId, id),
+        candidateCard: candidate => candidateCard(links, candidate) })
+      ctx.on('session/event', (session, event) => {
+        if (session.id === masterId && event.type === 'user/message') this.assessor.consumed(event.data.id)
+        const ticketId = ticketOfSession(session.id)
+        if (ticketId && (event.type === 'tool/call' || event.type === 'tool/result')) store.atomic(() => {
+          const ticket = store.tickets.get(ticketId)
+          if (!ticket || !liveTicket(ticket) || !ticket.execution?.workflow) return
+          observeWorkflow(ticket.execution.workflow, ticket.execution.directory, event)
+          store.tickets.save(ticket)
+        })
+      })
       // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat (see `Mirror`).
       const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, mirror, paused: () => this.paused() })
@@ -275,7 +325,7 @@ export class Runtime extends Service implements SourceHost {
       const recovery = this.recovery(store)
       const environments = environmentPort(this.environmentHosted?.tickets)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), workflow: workflowReason,
         workspaceBusy: ticketId => executor.workspaceBusy(ticketId),
         // No real channel is configured implicitly. This explicit host opt-in only writes simulation receipts.
         ...process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1'
@@ -303,9 +353,17 @@ export class Runtime extends Service implements SourceHost {
             if (environment) void recovery.adapter.cleanup(event.data.ticketId, environment)
               .catch(error => ctx.logger.warn('dsh-superagent: TP editor cleanup failed: %s', String(error)))
           }
-          // Phase 2 C: a ticket that took the environment notes it, so an operator sees who holds it.
+          // Phase 2 C: a ticket refused the environment notifies its IM channels (e.g. Feishu) as well as logging.
           if (event.type === 'ticket.exclusive' && event.data.action === 'refused') {
             ctx.logger.warn('dsh-superagent: ticket %s did not get the TP environment: %s', event.data.ticketId, String(event.data.reason))
+            const blocked = store.tickets.get(event.data.ticketId)
+            if (blocked && setup.configured()) {
+              const request = store.triggers.get(blocked.origin.triggerId)?.text ?? blocked.title
+              const assignmentId = latestAssignment(blocked)?.id
+              for (const message of environmentLockNotices(blocked, request, String(event.data.reason ?? ''), {
+                assignmentId, ...event.data.holder ? { holder: event.data.holder } : {},
+              })) outbox.send(message)
+            }
           }
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
@@ -339,6 +397,14 @@ export class Runtime extends Service implements SourceHost {
         deliveryEnabled: process.env.DSH_SUPERAGENT_DELIVERY_SIMULATION === '1',
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
+        notifyBlockedLock: (blocked, summary) => {
+          if (!setup.configured() || !isEnvironmentLockSummary(summary)) return false
+          const request = store.triggers.get(blocked.origin.triggerId)?.text ?? blocked.title
+          const assignmentId = latestAssignment(blocked)?.id
+          const messages = environmentLockNotices(blocked, request, summary, { assignmentId })
+          for (const message of messages) outbox.send(message)
+          return messages.length > 0
+        },
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
@@ -464,6 +530,8 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks,
+      resolveTicketAnalysisSource: input => runtime.resolveTicketAnalysisSource(input),
+      extractTicketExperience: (id, requestId) => runtime.extractTicketExperience(id, requestId),
       context: kind => runtime.context(kind),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },

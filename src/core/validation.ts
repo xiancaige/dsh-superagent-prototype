@@ -71,7 +71,7 @@ export function assertTicketValidated(ticket: Ticket): void {
   // phase A decided; a ticket with only a recorded visual conclusion has no unittest evidence to add.
   // Each gate names itself: one shared message made a missing test contract look identical to a
   // missing result, and a worker reading it tried `orchestrator_run_tests` instead of reporting.
-  if (!validation.contract && !validation.visual) throw new Error(
+  if (!validation.contract && validation.visual?.verdict === undefined) throw new Error(
     'Strict validation (acceptance gate): strict acceptance is enabled for this ticket but it has neither a test contract nor a recorded visual verdict')
   if (validation.contract) {
     if (validation.running) throw new Error(

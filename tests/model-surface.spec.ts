@@ -199,7 +199,7 @@ async function drive(host: Host) {
   await runtime.pump()
   await runtime.idle()
   await run(workerA, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
-  await runtime.receive(feishu('2', '再加一个按钮', { mentions: [], root_id: 'om_1' }))
+  await runtime.receive(feishu('2', `工单 ${a} 再加一个按钮`, { mentions: [], root_id: 'om_1' }))
   await vi.waitFor(async () => {
     await runtime.pump()
     expect(runtime.store.tickets.get(a)!.inputs.some(input => input.kind === 'resumed')).toBe(true)

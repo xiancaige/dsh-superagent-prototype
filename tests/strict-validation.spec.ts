@@ -110,7 +110,7 @@ describe('strict validation at Engine acceptance boundaries', () => {
     h.ready(id)
     const finishedAssignment = h.current(id).assignments.at(-1)!.id
     h.engine.receive({ id: 'follow-up', source: 'chat', threads: [{ source: 'chat', id: 'request-1' }],
-      actor: { source: 'chat', id: 'alice' }, human: true, at: '2026-11-02T01:00:00.000Z', text: 'Status?', meta: {},
+      actor: { source: 'chat', id: 'alice' }, human: true, at: '2026-11-02T01:00:00.000Z', text: `Status for ${id}?`, meta: {},
       channel: { source: 'chat', thread: 'request-1', address: { message: 'follow-up' } } })
     const resumedAssignment = h.current(id).assignments.at(-1)!.id
     expect(resumedAssignment).not.toBe(finishedAssignment)

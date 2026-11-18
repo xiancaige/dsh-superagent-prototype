@@ -1,6 +1,7 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { DELIVERY_LEVELS, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { DELIVERY_LEVELS, liveTicket, runningAssignment as activeAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { unrespondedHumanFollowups } from '../../executor/dsh.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -15,13 +16,15 @@ export interface ExecutorToolsHost {
   readonly deliveryEnabled?: boolean
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'> & Partial<Pick<EngineForExecutor,
     'runTicketTests' | 'recordVisual' | 'deliverTicket' | 'acquireEditor' | 'releaseEditor'>>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'> & { triggers?: Pick<Store['triggers'], 'disposition' | 'get'> }
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly lifetime?: AbortSignal
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
   sendReplies(): Promise<void>
+  /** Sends an idempotent IM notice when a worker reports `blocked` on an environment/editor lock without `human_action`. */
+  notifyBlockedLock?(ticket: Ticket, summary: string): boolean
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
@@ -44,7 +47,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
     }),
     tool({
       name: 'orchestrator_acquire_editor',
-      description: 'Take the exclusive TP editor lock before starting the editor, PIE, CQTest or the TPMcp port; fails naming the holder, so keep working on files and ask later. Not needed to edit, commit or push.',
+      description: 'Take the exclusive TP editor lock before starting the editor, PIE, CQTest or the TPMcp port; fails naming the holder (notifies IM), so keep working on files or pass human_action when blocked. Not needed to edit, commit or push.',
       schema: z.object({}).strict(),
       execute: async () => {
         if (!host.engine.acquireEditor) throw new Error('Editor lock unavailable')
@@ -141,6 +144,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
+        completion: z.enum(['implementation', 'accepted']).optional().describe('With ready: implementation awaits acceptance; accepted asserts the full contract passed. State evidence in summary.'),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
@@ -154,14 +158,29 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         return host.store.atomic(() => {
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
-          const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+          const report = { state: args.state, summary: args.summary, ...(args.completion ? { completion: args.completion } : {}), ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
+          const lockNotified = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention
+            ? host.notifyBlockedLock?.(updated, args.summary) ?? false : false
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          const unanswered = notification === 'internal_only' && host.store.triggers
+            ? unrespondedHumanFollowups(updated, host.store.triggers, activeAssignment(updated)?.idleAt ?? '') : []
+          const missingAttentionWarning = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention && !lockNotified
+            ? { warning: 'blocked without human_action or reply_to_trigger_id is NOT sent to IM/Feishu; pass human_action if human action is needed.' } : {}
+          return {
+            reported: true, notification, ...(lockNotified ? { lock_notification: 'queued' } : {}), ...(updated.attention ? { attention: updated.attention } : {}),
+            ...missingAttentionWarning,
+            ...(unanswered.length ? {
+              unanswered_human_triggers: unanswered.map(id => ({
+                trigger_id: id, preview: host.store.triggers!.get(id)?.text.replace(/\s+/g, ' ').slice(0, 80) ?? '',
+              })),
+              warning: 'internal_only progress is NOT delivered to the requester. If replying to a human message above, re-call orchestrator_report with reply_to_trigger_id (or use orchestrator_ack / orchestrator_trigger_handback); ignore only ordinary discussion.',
+            } : {}),
+          }
         })
       },
     }),

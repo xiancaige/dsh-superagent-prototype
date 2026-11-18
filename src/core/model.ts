@@ -231,7 +231,9 @@ export interface Assignment {
   startedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string }
+  report?: { state: ReportState; summary: string; at: string; completion?: 'implementation' | 'accepted' }
+  /** Terminal model-turn failure; host never multiplies the model's own retry budget. */
+  modelFailure?: { at: string; error: string; hostResumeBudget: 0 }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -344,7 +346,12 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+export interface Execution { name: string; directory: string; assignment: string
+  /** Persisted only after the host resolves this worker in its authorized workspace. */
+  workerBinding?: { sessionId: string; projectRoot: string; workspaceRoot: string }
+  /** Frozen host policy, Git baseline and successful tool-result coverage; never worker-authored. */
+  workflow?: import('../app/workflow-validation.ts').WorkflowSnapshot
+}
 /**
  * The worker a ticket runs under: `game` for gameplay, assets, content and project C++/Config, which the game worker
  * handles, and `ops` for the development tooling and AI files around them (dsh plugins, knowledge, plans, build scripts,

@@ -10,6 +10,7 @@ import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { canRetry } from './stage.ts'
+import { explicitTicketTarget } from './intake.ts'
 
 const sameChannel = (a: ChannelRef, b: ChannelRef): boolean => JSON.stringify(a) === JSON.stringify(b)
 /** Whether an Input is a message no person wrote, such as CI's, a bot's, or the main Session's note. */
@@ -240,6 +241,8 @@ export class Tickets extends EnginePart {
     this.leftToWorkers(trigger)
     const current = this.require(ticketId)
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
+    if (!liveTicket(current) && explicitTicketTarget(trigger, this.repo.tickets.list()) !== ticketId)
+      throw new Error('Ended ticket requires an explicit unique ticket identifier; ask which ticket to resume')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
     return trigger
   }
@@ -485,6 +488,8 @@ export class Tickets extends EnginePart {
   end(ticketId: string, by: TicketEndBy, outcome: TicketOutcome, at = this.now(), reason?: string): void {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) return
+    if (['completed', 'merged', 'closed'].includes(outcome)
+      && latestAssignment(ticket)?.report?.completion === 'implementation') throw new Error('Acceptance pending: implementation is not business completion')
     // Phase 2 C: a completion must be the one the host's own acceptance confirms, never a worker's report: one
     // it cannot confirm is refused here and changes nothing, so the ticket keeps the environment for the rework
     // and a person sees the refusal's reason.
@@ -492,6 +497,8 @@ export class Tickets extends EnginePart {
       throw new Error('TP environment: the ticket has not passed the acceptance this deployment requires, so it is not completed and keeps the environment for rework')
     }
     // A completion is also the work reaching the remote: uncommitted or unpushed work is not done, and the worker is told why.
+    const workflow = ['completed', 'merged', 'closed'].includes(outcome) ? this.options.workflow?.(ticket) : undefined
+    if (workflow) throw new Error(workflow)
     const unpublished = outcome === 'completed' ? this.options.publication?.(ticket) : undefined
     if (unpublished) throw new Error(`Completion refused: the ticket's work is not published to the remote. ${unpublished}`)
     const completed = outcome === 'completed'
@@ -537,6 +544,7 @@ export class Tickets extends EnginePart {
    * change asks for no work.
    */
   private unfinished(ticket: Ticket, at: string): boolean {
+    if (latestAssignment(ticket)?.report?.completion === 'implementation') return true
     const until = readUntil(ticket, false)
     const taken = this.triggersOf(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger' && !readBefore(input, until) ? [input.id] : []))
       .some(trigger => this.owners(trigger).includes(ticket.id) && this.takenUp(ticket, trigger))

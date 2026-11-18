@@ -24,6 +24,8 @@ export function health(state: Health['state'], code: HealthCode, values: Record<
 }
 export interface SourceHost {
   readonly sources: SourceRegistry
+  /** Internal read-only capability; never exposed as an HTTP route or model tool. */
+  resolveTicketAnalysisSource?(input: { ticketId: string; sessionId: string }): import('../app/ticket-analysis.ts').TicketAnalysisSource | undefined
   /** Returns the context for one Source kind; its `report` writes only the health entries declared by the kind. */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
 }
