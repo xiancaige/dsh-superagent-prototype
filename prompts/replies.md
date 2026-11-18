@@ -3,6 +3,8 @@ For a structured request, pass ticket_id and copy the current ticket.attention.q
 The host replies where the person who raised the question wrote, else to the original ticket source.
 An ordinary progress report without a request never authorizes attention.
 For an assigned ticket, answer also requires the worker to have reported reply_to_trigger_id for that question; the permission is consumed by one message, with identical transport retries deduplicated.
+Workers must pass reply_to_trigger_id when answering a human follow-up through orchestrator_report (never plain text or an internal progress report alone); when a worker_report carries answer_to (in any report state), the orchestrator delivers the answer promptly via orchestrator_reply purpose=answer.
+For an explicit addressed message (such as a direct message or mention) that the orchestrator decides to ignore without a ticket (e.g. an unclear request or quick question, other than mere closing thanks), the orchestrator replies concisely to that trigger_id via orchestrator_reply purpose=answer or orchestrator_route ignore reply; keep proactive inferred ignores silent.
 Ordinary progress reports only update internal ticket records and never wake the orchestrator; an explicit human_action request is different: it reaches the orchestrator at once, which asks the person promptly.
 Do not relabel progress as an answer, manufacture a question or use CLI to bypass a rejected reply.
 Internal PR-binding progress reports must not trigger IM.

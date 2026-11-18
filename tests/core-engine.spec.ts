@@ -1048,6 +1048,28 @@ describe('replies', () => {
     expect(h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toMatchObject({ status: 'pending' })
     expect(h.outbox.at(-1)!.channel).toEqual(trigger('1').channel)
   })
+  it('allows purpose=answer for triggers not owned by a live ticket (ended, stopped, context-only, or handed back)', () => {
+    const h = harness()
+    const channel = (id: string) => ({ source: 'chat', thread: 't1', address: { message: id } })
+    const stopped = accepted(h, '1', 't1').ticketId!
+    h.engine.stopTicket(stopped)
+    const msgOnStopped = trigger('2', { actor: guest, channel: channel('2') })
+    h.engine.receive(msgOnStopped)
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '2', text: 'Stopped already.' })).toMatchObject({ status: 'pending' })
+    expect(h.outbox.at(-1)).toMatchObject({ channel: msgOnStopped.channel, text: 'Stopped already.' })
+
+    const live = accepted(h, '3', 't3').ticketId!
+    h.engine.followForContext(live, { source: 'chat', id: 'ctx' })
+    const msgOnContext = trigger('4', { actor: guest, threads: [{ source: 'chat', id: 'ctx' }], channel: channel('4') })
+    h.engine.receive(msgOnContext)
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '4', text: 'Context thread reply.' })).toMatchObject({ status: 'pending' })
+
+    const followup = trigger('5', { actor: guest, threads: [{ source: 'chat', id: 't3' }], channel: channel('5') })
+    h.engine.receive(followup)
+    expect(() => h.engine.reply({ purpose: 'answer', triggerId: '5', text: 'Too early.' })).toThrow(new UserError('noAnswer'))
+    h.engine.handback(live, '5', 'Out of scope.')
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '5', text: 'Please clarify what to test.' })).toMatchObject({ status: 'pending' })
+  })
 })
 describe('ticket commands', () => {
   it('ends a ticket by the same rule on a close and on a ready report: once no PR it opened is open, as the latest of them ended', () => {

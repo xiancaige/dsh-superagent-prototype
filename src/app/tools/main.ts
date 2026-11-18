@@ -19,7 +19,7 @@ const RoutingNoteSchema = z.string().trim()
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 export interface MainToolsHost {
   readonly context: Context
-  readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
@@ -54,6 +54,7 @@ const RouteItemSchema = z.object({
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   workspace_role: z.enum(['game', 'ops']).nullish().describe('accept: ops for tooling/AI files; default game.'),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
+  reply: z.string().nullish().describe(`ignore on an explicit addressed message (DM or @mention): concise reply of at most ${IM_WORDS} words to post to the user explaining why or asking what is needed; omit for mere thanks or proactive observe ignores.`),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
 type Kind = RouteItem['kind']
@@ -67,6 +68,7 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   workspace_role: { check: z.enum(['game', 'ops']), reads: ['accept'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
+  reply: { check: AcknowledgementSchema, reads: ['ignore'], needs: [] },
 }
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
@@ -82,7 +84,7 @@ function invalid(item: RouteItem): string | undefined {
   }
   return undefined
 }
-type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[] }
+type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[]; replyId?: string }
 /**
  * Carry out one routing decision as its Engine command, in a transaction of its own. `decided` holds the Triggers that this
  * call's earlier items decided, with their batches.
@@ -117,7 +119,21 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
     case 'ignore': {
+      if (item.reply) {
+        const candidate = host.engine.candidate(item.trigger_id)
+        if (candidate && candidate.strength !== 'explicit') {
+          return { refused: 'ignore reply is only allowed on explicit addressed messages, not proactive observations' }
+        }
+        const trigger = host.store.triggers.get(item.trigger_id)
+        if (!trigger?.human || !trigger.channel) {
+          return { refused: 'ignore reply requires a human message with a reply channel' }
+        }
+      }
       const decision = host.engine.decide(item.trigger_id, { kind: 'ignore', reason: item.reason! })
+      if (item.reply && decision.strength === 'explicit') {
+        const reply = host.engine.reply({ purpose: 'answer', triggerId: item.trigger_id, text: item.reply })
+        return { ...fromDecision(decision), triggerIds: decision.triggerIds, replyId: reply.id }
+      }
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
   }
@@ -133,7 +149,8 @@ function routeTool(host: MainToolsHost): Tool {
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
     execute: async ({ decisions }) => {
       const decided = new Map<string, string>()
-      const results = decisions.map(item => {
+      const pendingReplies: string[] = []
+      const raw = decisions.map(item => {
         const head = { trigger_id: item.trigger_id, kind: item.kind }
         const problem = invalid(item)
         if (problem) return { ...head, refused: problem }
@@ -141,14 +158,21 @@ function routeTool(host: MainToolsHost): Tool {
           const result = route(host, item, decided)
           if ('refused' in result) return { ...head, ...result }
           for (const id of result.triggerIds ?? []) if (!decided.has(id)) decided.set(id, item.trigger_id)
+          if (result.replyId) pendingReplies.push(result.replyId)
           const ticket = result.ticketId ? host.store.tickets.get(result.ticketId) : undefined
           return { ...head, ...(result.decision ? { decision: result.decision } : {}), reason: result.reason,
-            ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
+            ...(ticket ? { ticket: ticketCard(ticket) } : {}), ...(result.replyId ? { _replyId: result.replyId } : {}) }
         } catch (error) {
           if (error instanceof UserError) return { ...head, refused: error.message }
           host.context.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
           return { ...head, refused: `Not recorded: ${error instanceof Error ? error.message : String(error)}; retry this item` }
         }
+      })
+      if (pendingReplies.length) await host.sendReplies()
+      const results = raw.map(entry => {
+        if (!('_replyId' in entry) || !entry._replyId) return entry
+        const { _replyId, ...rest } = entry
+        return { ...rest, reply_status: host.store.replyStatus(_replyId) ?? 'pending' }
       })
       host.requestPass()
       return { results }
@@ -226,9 +250,9 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_reply',
-      description: `Send an answer to a human question, a ready result, or attention requiring human action, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
+      description: `Send an answer to a human message (a ticket follow-up the worker answered, or an explicit addressed message handled or ignored without a ticket), a ready result, or attention requiring human action, as the replies section says; the gate refuses unready results and unanswered ticket follow-ups. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
       schema: z.object({
-        trigger_id: z.string().optional().describe('The original human question, for an answer only.'),
+        trigger_id: z.string().optional().describe('The original human message, for an answer only.'),
         ticket_id: z.string().optional(),
         purpose: z.enum(['answer', 'result', 'attention']),
         human_action: z.string().trim().min(1).optional().describe('Required for attention: the ticket\'s current attention question.'),

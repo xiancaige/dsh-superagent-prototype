@@ -19,7 +19,7 @@ import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
-import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import { cancelled, collectJob, hasBackgroundWork, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -230,6 +230,39 @@ export class WorkerSlots {
  * `agent/inbox/claimed`, `session/event` and `agent/error` events on the Cordis context, and reports status transitions back to Engine.
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
+/**
+ * Read human follow-up trigger IDs on `ticket` since `since` that have not yet been acknowledged,
+ * answered, asked about, or handed back. Origin triggers and context-only triggers are excluded.
+ */
+export function unrespondedHumanFollowups(ticket: Ticket, triggers: Pick<Store['triggers'], 'disposition'>, since = ''): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const input of ticket.inputs) {
+    if (input.kind !== 'trigger' || !input.human || input.context) continue
+    if (input.triggerId === ticket.origin.triggerId) continue
+    if (!input.readAt || (since && input.readAt <= since)) continue
+    if (seen.has(input.triggerId)) continue
+    seen.add(input.triggerId)
+    const disposition = triggers.disposition(input.triggerId)
+    if (disposition?.acked?.includes(ticket.id)) continue
+    if (disposition?.handbacks?.some(item => item.ticketId === ticket.id)) continue
+    if (ticket.attention?.triggerId === input.triggerId) continue
+    if (ticket.answers?.includes(input.triggerId)) continue
+    result.push(input.triggerId)
+  }
+  return result
+}
+/** Extracts the final assistant text of the latest turn (or all events when turn markers are absent in test fixtures). */
+function latestTurnText(agent: Agent): string {
+  const events = agent.session.snapshotEvents()
+  const turnAt = events.findLastIndex(event => event.type === 'turn/start')
+  const markAt = turnAt >= 0 ? turnAt : events.findLastIndex(event => event.type === 'user/message')
+  const scope = markAt >= 0 ? events.slice(markAt + 1) : events
+  const last = scope.filter(event => event.type === 'assistant/message').at(-1)
+  return last?.type === 'assistant/message'
+    ? last.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n').trim() : ''
+}
+
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -776,6 +809,25 @@ export class DshExecutor implements Executor {
       this.handOff(ticket.id, agent)
       return
     }
+    // If the worker answered a read human follow-up in plain text while background work keeps running,
+    // relay it immediately with `answers` instead of holding the reply behind `untilQuiet`.
+    const left = this.left.get(ticket.id)?.jobs
+    const sinceIdle = runningAssignment(before)?.idleAt ?? ''
+    const turnText = latestTurnText(agent)
+    const pendingBefore = turnText ? unrespondedHumanFollowups(before, this.host.store.triggers, sinceIdle) : []
+    let relayedInTurn = false
+    if (pendingBefore.length && await hasBackgroundWork(this.host.context, agent, left)) {
+      if (this.host.closing() || agent.status !== 'idle') return
+      this.host.store.atomic(() => {
+        const currentBefore = live()
+        if (!currentBefore || handedOff(currentBefore)) return
+        const answerTo = unrespondedHumanFollowups(currentBefore, this.host.store.triggers, sinceIdle).at(-1)
+        if (!answerTo) return
+        const updated = this.host.engine.report(ticket.id, { state: 'progress', summary: turnText, answers: answerTo })
+        this.relay(resultRelay(updated, 'progress', turnText, answerTo))
+        relayedInTurn = true
+      })
+    }
     // Its turn ends once nothing runs for it in the background, which holds its slot meanwhile: at most for the limit from
     // this idle, and until the worker runs again or the Assignment ends.
     this.settling.get(ticket.id)?.abort()
@@ -784,7 +836,6 @@ export class DshExecutor implements Executor {
     const timer = setTimeout(() => { limit.abort() }, BACKGROUND_LIMIT_MS)
     timer.unref?.()
     let quiet: boolean
-    const left = this.left.get(ticket.id)?.jobs
     try { quiet = await untilQuiet(this.host.context, agent, AbortSignal.any([this.host.lifetime, look.signal, limit.signal]), left) }
     finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) this.settling.delete(ticket.id) }
     const current = live()
@@ -806,17 +857,17 @@ export class DshExecutor implements Executor {
     }
     // The worker may have reported while its turn ended; a blocked or failed report a person's message has lifted is stale.
     if (handedOff(current)) return
-    const last = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').at(-1)
-    const text = last?.type === 'assistant/message'
-      ? last.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n').trim() : ''
+    const text = relayedInTurn ? '' : latestTurnText(agent)
+    const answerTo = text ? unrespondedHumanFollowups(current, this.host.store.triggers, sinceIdle).at(-1) : undefined
     const said = [text, stopped].filter(Boolean).join('\n\n')
     this.host.store.atomic(() => {
       const before = latestReport(current)?.summary ?? ''
       // The turn ended without a newer question (handedOff would have returned), so an open question was answered: clear it.
-      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null })
+      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null,
+        ...(answerTo ? { answers: answerTo } : {}) })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
-      if (said) this.relay(resultRelay(updated, 'waiting', said))
-      else if (!before.trim()) {
+      if (said) this.relay(resultRelay(updated, 'waiting', said, answerTo))
+      else if (!relayedInTurn && !before.trim()) {
         this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))
       }
     })

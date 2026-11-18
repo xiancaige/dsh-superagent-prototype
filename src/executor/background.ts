@@ -68,6 +68,19 @@ export const runningJobs = (ctx: Context, sessionId: string, except?: ReadonlySe
   const jobs = registry(ctx)
   return jobs ? owned(jobs, sessionId, except).map(job => ({ id: job.id, name: named(job) })) : []
 }
+/** Whether the worker currently has running owned shell jobs (excluding `except`) or live subagents. */
+export async function hasBackgroundWork(ctx: Context, agent: Agent, except?: ReadonlySet<string>): Promise<boolean> {
+  if (runningJobs(ctx, agent.id, except).length > 0) return true
+  const subagents = subagentsOf(ctx)
+  if (!subagents) return false
+  const children = subagents.listDescendants
+    ? await subagents.listDescendants(agent.id)
+    : await subagents.listChildren?.(agent.id) ?? []
+  return children.some(child => {
+    const childAgent = ctx.agents.get(child.id as SessionId)
+    return childAgent ? childAgent.status !== 'idle' : ('activity' in child && child.activity === 'running')
+  })
+}
 
 /**
  * Wait until no shell job the Session owns runs; false at once when none ran, or when `signal` aborts first. The wait is

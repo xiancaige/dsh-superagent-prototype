@@ -1,6 +1,7 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { DELIVERY_LEVELS, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { DELIVERY_LEVELS, liveTicket, runningAssignment as activeAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { unrespondedHumanFollowups } from '../../executor/dsh.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -15,7 +16,7 @@ export interface ExecutorToolsHost {
   readonly deliveryEnabled?: boolean
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'> & Partial<Pick<EngineForExecutor,
     'runTicketTests' | 'recordVisual' | 'deliverTicket' | 'acquireEditor' | 'releaseEditor'>>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'> & { triggers?: Pick<Store['triggers'], 'disposition' | 'get'> }
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly lifetime?: AbortSignal
   readonly resources: ResourceHost
@@ -162,7 +163,17 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          const unanswered = notification === 'internal_only' && host.store.triggers
+            ? unrespondedHumanFollowups(updated, host.store.triggers, activeAssignment(updated)?.idleAt ?? '') : []
+          return {
+            reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}),
+            ...(unanswered.length ? {
+              unanswered_human_triggers: unanswered.map(id => ({
+                trigger_id: id, preview: host.store.triggers!.get(id)?.text.replace(/\s+/g, ' ').slice(0, 80) ?? '',
+              })),
+              warning: 'internal_only progress is NOT delivered to the requester. If replying to a human message above, re-call orchestrator_report with reply_to_trigger_id (or use orchestrator_ack / orchestrator_trigger_handback); ignore only ordinary discussion.',
+            } : {}),
+          }
         })
       },
     }),
