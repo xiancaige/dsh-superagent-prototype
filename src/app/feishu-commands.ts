@@ -483,7 +483,7 @@ export class FeishuCommands {
       const stage = ticketStage(ticket)
       if (stage.stage === 'person') person++
       else if (stage.stage === 'idle') idle++
-      else if (stage.action === 'queued') queued++
+      else if (stage.stage === 'working' && stage.action === 'queued') queued++
       else working++
     }
     const env = this.host.environment?.()
