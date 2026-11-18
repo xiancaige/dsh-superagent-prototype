@@ -42,6 +42,8 @@ describe('environment lock Feishu notices', () => {
         editorExe: 'D:/UnrealEngine/Engine/Binaries/Win64/UnrealEditor.exe',
         mcpPort: 55255,
         captureTool: 'CaptureWidgetBlueprintScreenshot',
+        captureToolset: 'TPEditor.TPEditorToolset',
+        waitSeconds: 300,
       },
     })
     const first = await h.acceptedTicket(feishu('1', '@bot run PIE check'))
