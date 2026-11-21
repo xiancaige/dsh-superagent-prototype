@@ -33,8 +33,9 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import type { EnvironmentExclusivityView } from './environment-exclusive.ts'
+import { retryFinalize, type FinalizeRetryHost } from './finalize-retry.ts'
 
-export interface HttpHost {
+export interface HttpHost extends FinalizeRetryHost {
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -43,7 +44,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'workspaceBusy'>
   readonly health: Record<string, Health>
   /** The workspace this plugin mounted; a saved panel choice applies only after it restarts. */
   readonly mounted: Machine
@@ -254,6 +255,7 @@ function routes(runtime: HttpHost): Routes {
       return { validation: updated.validation! }
     },
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
+    'POST tickets/:id/finalize/retry': ({ params }) => retryFinalize(runtime, params.id),
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
     'GET tickets/:id/delivery': ({ params }) => runtime.engine.deliveryState(ticket(params.id)),
     'PUT tickets/:id/delivery': async ({ params, body }) => {

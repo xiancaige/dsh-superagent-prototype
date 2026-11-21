@@ -529,7 +529,7 @@ export class Runtime extends Service implements SourceHost {
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks,
+    return { store, effects: this.effects, sources, prompts, sessions, settings, engine, executor, health, mounted, masterId, ready, sourceLinks,
       resolveTicketAnalysisSource: input => runtime.resolveTicketAnalysisSource(input),
       extractTicketExperience: (id, requestId) => runtime.extractTicketExperience(id, requestId),
       context: kind => runtime.context(kind),

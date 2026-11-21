@@ -293,6 +293,7 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'POST tickets/:id/finalize/retry': { answer: () => ({ retried: true }) },
   'GET tickets/:id/experience': { answer: () => ({ authorized: false }) },
   'POST tickets/:id/experience': { body: true, answer: () => ({ ok: false, reason: 'out-of-scope' }) },
   'PUT source:wecom/secret': { body: true, answer: ({ body }) => ({ saved: true, variable: body.variable, file: `/tmp/secrets.env` }) },
