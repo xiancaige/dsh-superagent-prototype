@@ -42,3 +42,14 @@ export async function initializeRoleModel(ctx: Context, agent: Agent, model: Rol
   })
   await ctx.sessionPersistence.flush()
 }
+
+/** Apply a role's configured model onto an existing session without mutating the global DSH default. */
+export async function applyRoleModel(ctx: Context, agent: Agent, model: RoleModel): Promise<void> {
+  const selected = await resolveRoleModel(ctx, model)
+  // Prefer the agent's model controller (`agent.model.select`) and fall back to appending `model/selection` directly;
+  // never call `sessionController.selectModel`, which mutates DSH's global `agent-default-model`.
+  const controller = (agent as Agent & { model?: { select(selection: ModelSelection): void } }).model
+  if (typeof controller?.select === 'function') controller.select(selected)
+  else agent.session.append('model/selection', selected)
+  await ctx.sessionPersistence.flush()
+}

@@ -79,8 +79,8 @@ export interface SettingsHost {
   /** DSH Cordis context used to validate and resolve role models. */
   readonly context: Context
   readonly lifetime: AbortSignal
-  /** Session manager through which the main Session is notified of saved settings. */
-  readonly sessions: Pick<Sessions, 'notify' | 'delivery'>
+  /** Session manager through which the main Session is notified of saved settings and receives updated eval models. */
+  readonly sessions: Pick<Sessions, 'notify' | 'delivery'> & Partial<Pick<Sessions, 'selectMasterModel'>>
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
@@ -206,6 +206,10 @@ export class Settings {
     const blocked = settings.executor.blockedCommands
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
     if (changed) await this.host.setup.blockCommands(blocked)
+    // Apply a newly saved non-null assessor model to the running main Session without mutating DSH's global default.
+    if (block === 'eval' && settings.eval.model && JSON.stringify(settings.eval.model) !== JSON.stringify(old.eval.model)) {
+      await sessions.selectMasterModel?.(settings.eval.model)
+    }
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
     const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
     if (restarting) this.host.setup.restart()

@@ -30,7 +30,7 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
 
 type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
 type FakeAgent = {
-  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
+  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }; session: { append: Mock }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
 }
 /** A text message, as DSH's job tools and subagents send their notices. */

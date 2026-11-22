@@ -4,7 +4,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { agentEvents, installModelSelection, type Agent, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { initializeRoleModel } from '../src/app/role-models.ts'
+import { applyRoleModel, initializeRoleModel } from '../src/app/role-models.ts'
 const contexts: Context[] = []
 afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose())); vi.restoreAllMocks() })
 async function fixture() {
@@ -62,4 +62,21 @@ it('inherits the host when unset and fails unavailable routes before recording a
   resolve.mockRejectedValueOnce(new Error('unknown provider'))
   await expect(initializeRoleModel(ctx, agent, { provider: 'unknown', model: 'x' })).rejects.toThrow('unknown provider')
   expect(agent.session.snapshotEvents().some(event => event.type === 'model/selection')).toBe(false)
+})
+
+it('applyRoleModel updates an existing session model without touching any global sessionController default', async () => {
+  const { ctx, agent, flush } = await fixture()
+  const select = vi.fn()
+  Object.assign(agent, { model: { select } })
+  await applyRoleModel(ctx, agent, { provider: 'codex-proxy-256k', model: 'auto-code' })
+  expect(select).toHaveBeenCalledWith({ provider: 'codex-proxy-256k', model: 'auto-code' })
+  expect(flush).toHaveBeenCalledOnce()
+
+  // Falls back to appending model/selection directly when agent.model is absent.
+  delete (agent as { model?: unknown }).model
+  await applyRoleModel(ctx, agent, { provider: 'codex-proxy-256k', model: 'gpt-6-luna', reasoningEffort: 'high' })
+  expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+    type: 'model/selection',
+    data: { provider: 'codex-proxy-256k', model: 'gpt-6-luna', reasoningEffort: 'high' },
+  })
 })

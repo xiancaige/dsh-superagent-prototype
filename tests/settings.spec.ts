@@ -99,3 +99,14 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
 })
+
+it('applies a newly saved eval.model to the existing main Session without calling sessionController.selectModel', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const master = h.agents.get(h.runtime.masterId)!
+  const currentEval = store.settings().eval
+  await settings.save('eval', { ...currentEval, model: { provider: 'codex-proxy-256k', model: 'auto-code' } },
+    store.blockRevision('eval'), 'panel')
+  expect(h.controller.selectModel).not.toHaveBeenCalled()
+  expect(master.session.append).toHaveBeenCalledWith('model/selection', { provider: 'codex-proxy-256k', model: 'auto-code' })
+})
