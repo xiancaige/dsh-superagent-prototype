@@ -298,24 +298,31 @@ export class Sessions {
     let turnNumber = 0
     let nudgedThisTurn = false
     const turnTickets = new Set<string>()
-    const actedTickets = new Set<string>()
+    const answeredOnlyTickets = new Set<string>()
+    const resolvedTickets = new Set<string>()
     const recordAction = (toolName: string, rawArgs: unknown, output: unknown): void => {
       if (!master) return
       const args = (rawArgs ?? {}) as Record<string, unknown>
       if ((toolName === 'orchestrator_ticket_advance' || toolName === 'orchestrator_ticket_retry') && typeof args.ticket_id === 'string') {
-        actedTickets.add(args.ticket_id)
+        resolvedTickets.add(args.ticket_id)
       } else if (toolName === 'orchestrator_reply') {
-        if (typeof args.ticket_id === 'string') actedTickets.add(args.ticket_id)
-        else if (typeof args.trigger_id === 'string') {
-          const fanout = host.store.triggers?.disposition(args.trigger_id)?.fanout ?? []
-          for (const tid of fanout) if (turnTickets.has(tid)) actedTickets.add(tid)
-          if (!fanout.length) for (const tid of turnTickets) actedTickets.add(tid)
+        const purpose = args.purpose
+        const targets = typeof args.ticket_id === 'string'
+          ? [args.ticket_id]
+          : typeof args.trigger_id === 'string'
+            ? (host.store.triggers?.disposition(args.trigger_id)?.fanout ?? []).filter(tid => turnTickets.has(tid))
+            : []
+        const effective = targets.length ? targets : [...turnTickets]
+        if (purpose === 'result' || purpose === 'attention') {
+          for (const tid of effective) resolvedTickets.add(tid)
+        } else if (purpose === 'answer') {
+          for (const tid of effective) answeredOnlyTickets.add(tid)
         }
       } else if (toolName === 'orchestrator_route' && Array.isArray(args.decisions)) {
         const results = (output as { results?: Array<{ decision?: unknown }> } | undefined)?.results ?? []
         for (let i = 0; i < args.decisions.length; i++) {
           const item = args.decisions[i] as { kind?: unknown; ticket_id?: unknown } | undefined
-          if (item?.kind === 'stop' && typeof item.ticket_id === 'string' && results[i]?.decision === 'stop') actedTickets.add(item.ticket_id)
+          if (item?.kind === 'stop' && typeof item.ticket_id === 'string' && results[i]?.decision === 'stop') resolvedTickets.add(item.ticket_id)
         }
       }
     }
@@ -340,7 +347,8 @@ export class Sessions {
             turnNumber = turn
             nudgedThisTurn = false
             turnTickets.clear()
-            actedTickets.clear()
+            answeredOnlyTickets.clear()
+            resolvedTickets.clear()
           }
           const reports = supervisorReports(messages)
           for (const tid of reports.ticketIds) turnTickets.add(tid)
@@ -372,11 +380,14 @@ export class Sessions {
         agent.ctx.on('agent/turn-stopping', () => {
           if (nudgedThisTurn || !turnTickets.size) return
           const pending = [...turnTickets].filter(id => {
-            if (actedTickets.has(id)) return false
+            if (resolvedTickets.has(id)) return false
             const current = host.store.tickets.get(id)
             if (!current || !canAdvanceTicket(current)) return false
-            const state = latestReport(current)?.state
-            return state === 'waiting' || state === 'blocked' || state === 'failed' || state === 'ready'
+            const report = latestReport(current)
+            const state = report?.state
+            if (state === 'ready' && report?.completion === 'implementation') return true
+            if (answeredOnlyTickets.has(id)) return false
+            return state === 'waiting' || state === 'blocked' || state === 'failed'
           })
           if (!pending.length) return
           nudgedThisTurn = true
@@ -384,7 +395,7 @@ export class Sessions {
             content: [{ type: 'text', text: JSON.stringify({
               kind: 'supervisor_nudge',
               ticket_ids: pending,
-              action: 'Advanceable worker report(s) received in this turn were left unacted. Follow the injected dsh-superagent-supervisor skill: call orchestrator_ticket_advance to push the worker toward goal completion, or escalate with orchestrator_reply if a hard gate or repeated unchanged blocker requires human action.',
+              action: 'Advanceable worker report(s) received in this turn were left unacted (including completion=implementation after only answering a status probe). Apply dsh-superagent-supervisor: call orchestrator_ticket_advance when a concrete next step exists, or escalate/report stalled if blocked with no progress.',
             }) }],
             source: { kind: 'dsh-superagent', form: 'relay' },
           }))

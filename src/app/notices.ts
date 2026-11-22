@@ -125,8 +125,10 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
 export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' | 'summary' | 'question' | 'answers'>): Relay | undefined {
   const asked = report.question ? ticket.attention : undefined
   if (asked) {
+    const advanceable = canAdvanceTicket(ticket)
     return { id: `attention:${ticket.id}:${asked.id}`,
-      text: JSON.stringify({ kind: 'worker_attention', ticket: brief(ticket), state: report.state, read: `ticket/${ticket.id}/result` }) }
+      text: JSON.stringify({ kind: 'worker_attention', ticket: brief(ticket), state: report.state,
+        ...advanceable ? { can_advance: true } : {}, read: `ticket/${ticket.id}/result` }) }
   }
   if (report.state === 'progress' && !report.answers) return undefined
   return resultRelay(ticket, report.state, report.summary, report.answers)

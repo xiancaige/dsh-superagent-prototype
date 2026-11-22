@@ -350,10 +350,35 @@ describe('prompt contracts for orchestrator advance and DSH restart verification
     await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 2, signal: new AbortController().signal } as never)
     expect(masterAgent.steer).toHaveBeenCalledTimes(1)
 
+    // In a new turn, answering a status follow-up alone without advancing a completion=implementation ticket STILL triggers one nudge.
+    const answeredRelay = {
+      ...relayMessage,
+      id: relayMessage.id,
+    }
+    await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [answeredRelay], turn: 3, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [answeredRelay] }),
+    )
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'ready',
+      completion: 'implementation',
+      reply_to_trigger_id: host.runtime.store.tickets.get(ticket.id)!.origin.triggerId,
+      summary: '再次汇报半成品。',
+    })
+    await host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      trigger_id: host.runtime.store.tickets.get(ticket.id)!.origin.triggerId,
+      purpose: 'answer',
+      text: '已收到进度，正在核对。',
+    })
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 3, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).toHaveBeenCalledTimes(1)
+
     // Once the orchestrator advances the ticket, turn-stopping in a new turn stays quiet.
     await masterCtx.waterfall(
       'agent/pre-step',
-      { agent: masterAgent, messages: [relayMessage], turn: 3, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      { agent: masterAgent, messages: [relayMessage], turn: 4, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
       async () => ({ kind: 'enter' as const, messages: [relayMessage] }),
     )
     await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
@@ -362,7 +387,74 @@ describe('prompt contracts for orchestrator advance and DSH restart verification
       rationale: 'Implementation-only stop leaves the requested end-to-end flow broken; within mandate.',
     })
     masterAgent.steer.mockClear()
-    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 3, signal: new AbortController().signal } as never)
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 4, signal: new AbortController().signal } as never)
     expect(masterAgent.steer).not.toHaveBeenCalled()
+  })
+
+  it('refuses repeated advances with no progress (advanceStalled) and stops nudging so stalled tickets do not spin', async () => {
+    host = await startRuntime()
+    const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 推进边界测试'))
+
+    // 1. Worker repeats the same unchanged attention question after an advance -> refused with advanceStalled.
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'blocked',
+      summary: 'Waiting for choice',
+      human_action: 'Use mode A or mode B?',
+    })
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Use mode A by default.',
+      rationale: 'Routine default within mandate.',
+    })
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'blocked',
+      summary: 'Still stuck on mode choice',
+      human_action: 'Use mode A or mode B?',
+    })
+    expect(canAdvanceTicket(host.runtime.store.tickets.get(ticket.id)!)).toBe(false)
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Use mode A again.',
+      rationale: 'Retrying.',
+    })).rejects.toThrow(/no new progress/i)
+
+    // turn-stopping must NOT nudge when canAdvanceTicket is false (ticket must stop cleanly).
+    const masterAgent = host.agents.get(host.runtime.masterId)!
+    const masterCtx = (masterAgent as unknown as { ctx: import('@deepseek-ai/cordis').Context }).ctx
+    const stalledRelay = masterAgent.inbox.nextStep.at(-1)!
+    await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [stalledRelay], turn: 10, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [stalledRelay] }),
+    )
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 10, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).not.toHaveBeenCalled()
+
+    // 2. A fresh human follow-up resets consecutive non-ready advance budget, but >=2 consecutive advances without human input stops churn.
+    const human2 = feishu('2', '@bot 换个方向试下 C', { root_id: 'om_1' })
+    host.runtime.receive(human2)
+    await host.runtime.idle()
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Blocked step 1', human_action: null })
+    expect(canAdvanceTicket(host.runtime.store.tickets.get(ticket.id)!)).toBe(true)
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try step C1.',
+      rationale: 'First step after new human direction.',
+    })
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'Failed step 2' })
+    expect(canAdvanceTicket(host.runtime.store.tickets.get(ticket.id)!)).toBe(true)
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try step C2.',
+      rationale: 'Second distinct step.',
+    })
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Paused step 3' })
+    expect(canAdvanceTicket(host.runtime.store.tickets.get(ticket.id)!)).toBe(false)
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try step C3.',
+      rationale: 'Should stop after consecutive advances without progress.',
+    })).rejects.toThrow(/no new progress/i)
   })
 })

@@ -54,6 +54,7 @@ export const USER_ERRORS = {
   advanceModelFailure: ['refused', 'Cannot advance a ticket after a terminal model-turn failure (host resume budget 0); explicit human retry is required'],
   advanceDesignBlocked: ['refused', 'Cannot advance a ticket blocked on required human design approval'],
   advanceAlreadyReady: ['refused', 'Ticket already reported ready for review; no worker advancement is needed'],
+  advanceStalled: ['refused', 'Cannot advance a ticket repeatedly on the same unchanged report or blocker with no new progress; stop advancing and escalate or end instead'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

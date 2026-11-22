@@ -12,6 +12,44 @@ import type { Replies } from './replies.ts'
 import { canRetry, ticketStage } from './stage.ts'
 import { explicitTicketTarget } from './intake.ts'
 
+/** Maximum number of orchestrator advances allowed on an open ticket when reports make no progress. */
+const MAX_CONSECUTIVE_ADVANCES_WITHOUT_PROGRESS = 2
+
+const normalizeReportSignature = (text: string): string => text.trim().replace(/\s+/g, ' ').slice(0, 400)
+
+function latestAdvanceProgress(ticket: Ticket): { repeatedUnchanged: boolean; consecutiveSinceHuman: number } {
+  const decisions = ticket.orchestratorDecisions ?? []
+  if (!decisions.length) return { repeatedUnchanged: false, consecutiveSinceHuman: 0 }
+  const latest = latestAssignment(ticket)
+  const report = latest?.report
+  const currentSignature = ticket.attention?.question
+    ? `attention:${normalizeReportSignature(ticket.attention.question)}`
+    : report
+      ? `${report.state}:${report.completion ?? ''}:${normalizeReportSignature(report.summary)}`
+      : undefined
+  const lastHumanAt = ticket.inputs
+    .filter(input => input.kind === 'trigger' && input.human && !input.context)
+    .at(-1)?.at ?? ''
+  const sinceHuman = decisions.filter(item => item.at > lastHumanAt)
+  if (!sinceHuman.length || !currentSignature) return { repeatedUnchanged: false, consecutiveSinceHuman: 0 }
+  // Count consecutive advances since the last human input whose previous recorded report/question matches the current one,
+  // or whose decision arrived without changing the worker's report state/content.
+  let sameAsLast = false
+  const prev = sinceHuman.at(-1)!
+  const prevSummary = prev.question
+    ? `attention:${normalizeReportSignature(prev.question)}`
+    : prev.context
+      ? normalizeReportSignature(prev.context)
+      : undefined
+  const currentSummary = report ? normalizeReportSignature(report.summary) : undefined
+  if (prev.question && ticket.attention?.question && normalizeReportSignature(prev.question) === normalizeReportSignature(ticket.attention.question)) {
+    sameAsLast = true
+  } else if (!prev.question && report && prevSummary && currentSummary) {
+    if (report.at <= prev.at || currentSummary.startsWith(prevSummary.slice(0, 200))) sameAsLast = true
+  }
+  return { repeatedUnchanged: sameAsLast, consecutiveSinceHuman: sinceHuman.length }
+}
+
 /**
  * Returns the refusal error code if `ticket` cannot currently be advanced by `advanceTicket`, or `undefined` when it is advanceable.
  */
@@ -22,6 +60,11 @@ export function advanceRefusalCode(ticket: Ticket): UserErrorCode | undefined {
   if (latest?.modelFailure?.hostResumeBudget === 0) return 'advanceModelFailure'
   if (ticket.designApproval?.required && !ticket.designApproval.approval && latest?.state === 'pending') return 'advanceDesignBlocked'
   if (latest?.report?.state === 'ready' && latest.report.completion !== 'implementation') return 'advanceAlreadyReady'
+  const progress = latestAdvanceProgress(ticket)
+  if (progress.repeatedUnchanged) return 'advanceStalled'
+  if (progress.consecutiveSinceHuman >= MAX_CONSECUTIVE_ADVANCES_WITHOUT_PROGRESS) {
+    return 'advanceStalled'
+  }
   return undefined
 }
 /** True when `advanceTicket` can currently push `ticket` forward within its existing Mandate. */

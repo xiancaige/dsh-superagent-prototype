@@ -766,6 +766,7 @@ const TEXT = {
   'userError.advanceModelFailure': ['工单发生了终止性的模型请求失败（宿主自动恢复额度为 0），需要人工显式重试。', USER_ERRORS.advanceModelFailure[1]],
   'userError.advanceDesignBlocked': ['工单正在等待必需的人工设计确认，不能绕过该门禁代为推进。', USER_ERRORS.advanceDesignBlocked[1]],
   'userError.advanceAlreadyReady': ['工单已报告就绪并进入待验收状态，无需再推进执行器。', USER_ERRORS.advanceAlreadyReady[1]],
+  'userError.advanceStalled': ['工单在未见新进展的同一汇报或阻塞上已连续推进，请停止推进并升级给人或结单。', USER_ERRORS.advanceStalled[1]],
   // Setup problems and health codes; English reuses the host's own text read by the log and main Session
   'setup.repositoryUnset': ['GitHub 来源没有设置监听的仓库。', SETUP_PROBLEMS.repositoryUnset[1]],
   'setup.foreignFile': ['{file} 不是 dsh-superagent 写入的文件；移走它，或换一个状态目录。', SETUP_PROBLEMS.foreignFile[1]],
