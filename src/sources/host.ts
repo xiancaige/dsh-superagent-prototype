@@ -26,6 +26,8 @@ export interface SourceHost {
   readonly sources: SourceRegistry
   /** Internal read-only capability; never exposed as an HTTP route or model tool. */
   resolveTicketAnalysisSource?(input: { ticketId: string; sessionId: string }): import('../app/ticket-analysis.ts').TicketAnalysisSource | undefined
+  /** Internal read-only diagnostic explaining why `resolveTicketAnalysisSource` refused a ticket. */
+  diagnoseTicketAnalysisSource?(input: { ticketId: string; sessionId: string }): import('../app/ticket-analysis.ts').TicketAnalysisSourceRefusal | undefined
   /** Returns the context for one Source kind; its `report` writes only the health entries declared by the kind. */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
 }

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
-import { resolveTicketAnalysisSource } from '../src/app/ticket-analysis.ts'
+import { diagnoseTicketAnalysisSource, resolveTicketAnalysisSource } from '../src/app/ticket-analysis.ts'
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
 
@@ -53,15 +53,26 @@ it('resolves only persisted terminal worker bindings and rejects stop, spoofing 
   const store = h.runtime.store
   const source = () => resolveTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })
   expect(source()).toBeUndefined()
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: 'unknown', sessionId })).toBe('ticket-not-found')
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBe('ticket-not-ended')
   const stored = store.tickets.get(ticket.id)!
   expect(stored.execution!.workerBinding).toEqual({ sessionId, projectRoot: h.directory, workspaceRoot: stored.execution!.directory })
   await h.runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'No work' })
   expect(source()).toMatchObject({ ticketId: ticket.id, sessionId, outcome: 'dropped', projectRoot: h.directory })
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBeUndefined()
   expect(resolveTicketAnalysisSource(store, { ticketId: ticket.id, sessionId: 'worker-other' })).toBeUndefined()
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId: 'worker-other' })).toBe('session-id-mismatch')
   const ended = store.tickets.get(ticket.id)!
   ended.execution!.directory += '-forged'; store.tickets.save(ended)
   expect(source()).toBeUndefined()
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBe('binding-workspace-mismatch')
   ended.execution!.directory = ended.execution!.workerBinding!.workspaceRoot
   ended.ended = { at: new Date().toISOString(), by: 'human', outcome: 'stopped' }; store.tickets.save(ended)
   expect(source()).toBeUndefined()
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBe('stopped-by-person')
+  ended.ended = { at: new Date().toISOString(), by: 'human', outcome: 'completed' }; store.tickets.save(ended)
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBe('ticket-ended-by-non-executor')
+  ended.ended = { at: new Date().toISOString(), by: 'executor', outcome: 'completed' }
+  delete ended.execution!.workerBinding; store.tickets.save(ended)
+  expect(diagnoseTicketAnalysisSource(store, { ticketId: ticket.id, sessionId })).toBe('missing-worker-binding')
 })

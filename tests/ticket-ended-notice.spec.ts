@@ -131,3 +131,27 @@ it('waits for analysis completion and records failure without repeated LLM billi
     expect(f.warn).toHaveBeenCalledTimes(1)
   } finally { await f.effects.drain(); f.store.close() }
 })
+
+it('waits for a settling worker turn and flushes session persistence before calling evolution analysis', async () => {
+  const f = fixture()
+  const order: string[] = []
+  let settleTurn!: () => void
+  const agent = {
+    status: 'running',
+    whenIdle: vi.fn(() => new Promise<void>(resolve => {
+      settleTurn = () => { agent.status = 'idle'; order.push('idle'); resolve() }
+    })),
+  }
+  f.ctx.provide('agents' as never, new Map([['worker-t1', agent]]) as never)
+  f.ctx.provide('sessionPersistence' as never, { flush: vi.fn(async () => { order.push('flush') }) } as never)
+  f.service(vi.fn(async () => { order.push('analyze'); return { ok: true, status: 'completed' } }))
+  try {
+    f.effects.start()
+    f.effects.enqueue('ticketAnalysis', 't1', input)
+    await Promise.resolve()
+    expect(order).toEqual([])
+    settleTurn()
+    await f.effects.idle()
+    expect(order).toEqual(['idle', 'flush', 'analyze'])
+  } finally { await f.effects.drain(); f.store.close() }
+})

@@ -28,7 +28,7 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
-import { installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
+import { diagnoseTicketAnalysisSource, installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
 import { historyMigrationStore, type HistoryMigrationRequest, type HistoryMigrationService } from './history-migration.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
@@ -96,6 +96,9 @@ function sleepSync(ms: number): void {
 export class Runtime extends Service implements SourceHost {
   resolveTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
     return resolveTicketAnalysisSource(this.store, input)
+  }
+  diagnoseTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
+    return diagnoseTicketAnalysisSource(this.store, input)
   }
   /** Loopback management only: one explicitly requested attempt, never a history sweep. */
   async extractTicketExperience(ticketId: string, requestId: string) {
