@@ -270,3 +270,29 @@ it('sends one stop for a double click on Confirm', async () => {
   await act(async () => { confirm.click(); confirm.click() })
   expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
 })
+
+it('shows recorded orchestrator decisions and their rationale on the ticket page', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = {
+    ...t1,
+    orchestratorDecisions: [{
+      id: 'od1', at: '2026-09-22T00:06:00Z', stage: 'person/answer',
+      question: 'Default to newest-first?',
+      decision: 'Use newest-first sort order.',
+      rationale: 'Matches existing list views within mandate.',
+      inputId: 'i-od1',
+    }],
+    inputs: [{
+      id: 'i-od1', kind: 'orchestrator-decision', at: '2026-09-22T00:06:00Z', delivered: true,
+      question: 'Default to newest-first?', decision: 'Use newest-first sort order.',
+      rationale: 'Matches existing list views within mandate.',
+    }, ...t1.inputs],
+  }
+  at({ page: 'execution', id: 't1' })
+  await mount()
+  expect(text()).toContain(zh.orchestratorDecisions)
+  expect(text()).toContain('Use newest-first sort order.')
+  expect(text()).toContain('Matches existing list views within mandate.')
+  await click(zh.deliveredInputs.replace('{count}', '2'))
+  expect(text()).toContain(zh['input.orchestrator-decision'])
+})

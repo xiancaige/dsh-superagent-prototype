@@ -266,6 +266,8 @@ export type TicketInput =
   | { id: string; kind: 'text'; text: string; at: string }
   /** A fact the main Session gave the ticket from other work: context, which asks for nothing and grants nothing. */
   | { id: string; kind: 'note'; text: string; at: string }
+  /** An orchestrator decision or push-forward within the ticket's existing Mandate, with its recorded rationale. */
+  | { id: string; kind: 'orchestrator-decision'; decision: string; rationale: string; question?: string; at: string }
 
 /**
  * How a Policy change bears on a ticket: the rules it was accepted under that changed, with their instruction now, or no
@@ -284,6 +286,25 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
+/** One orchestrator decision or push-forward made within a ticket's existing Mandate, recording its decision process. */
+export interface OrchestratorDecision {
+  id: string
+  at: string
+  /** Ticket stage at the time the orchestrator stepped in. */
+  stage: string
+  /** Active attention id resolved by this decision, if any. */
+  attentionId?: string
+  /** Question resolved by this decision, when it answered `ticket.attention`. */
+  question?: string
+  /** Worker report summary or pause context when no `ticket.attention` was open. */
+  context?: string
+  /** Concrete decision or guidance delivered to the worker. */
+  decision: string
+  /** Recorded decision process: options/evidence weighed and why it stays within the existing Mandate. */
+  rationale: string
+  /** `TicketInput.id` created to deliver this decision to the worker. */
+  inputId: string
+}
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string
@@ -339,6 +360,8 @@ export interface Ticket {
   delivery?: { error: string; at: string }
   /** The worker this ticket runs under, as the routing decision named it; omitted is `game`. */
   workspaceRole?: WorkspaceRole
+  /** Orchestrator decisions/push-forwards made within this ticket's Mandate, recording the decision process. */
+  orchestratorDecisions?: OrchestratorDecision[]
 }
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it
@@ -407,5 +430,7 @@ export function waitsForPerson(ticket: Ticket): boolean {
   const report = latestAssignment(ticket)?.report
   if (report?.state !== 'blocked' && report?.state !== 'failed') return false
   if (blockedForEnvironment(ticket)) return false
-  return !ticket.inputs.some(input => input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
+  return !ticket.inputs.some(input =>
+    ((input.kind === 'trigger' && input.human && !input.context) || input.kind === 'orchestrator-decision')
+    && input.at > report.at)
 }

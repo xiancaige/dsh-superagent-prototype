@@ -49,6 +49,11 @@ export const USER_ERRORS = {
   ticketLive: ['refused', 'This ticket is still running; hand its environment over or stop it instead'],
   notHolding: ['refused', 'This ticket does not hold the shared environment'],
   adapterNotForRole: ['refused', 'The {adapter} acceptance adapter cannot judge a {role} ticket (allowed for this role: {allowed})'],
+  advanceInvalid: ['refused', 'Advancing a ticket requires both a concrete decision and a recorded rationale'],
+  advanceEnvironmentBlocked: ['refused', 'Cannot advance a ticket waiting for the shared TP environment lock; wait for release or coordinate with the holder'],
+  advanceModelFailure: ['refused', 'Cannot advance a ticket after a terminal model-turn failure (host resume budget 0); explicit human retry is required'],
+  advanceDesignBlocked: ['refused', 'Cannot advance a ticket blocked on required human design approval'],
+  advanceAlreadyReady: ['refused', 'Ticket already reported ready for review; no worker advancement is needed'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

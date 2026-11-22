@@ -1,6 +1,6 @@
 /** Compact, bounded model-facing projections of triggers, tickets, threads, and decisions; full texts stay behind readable resources. */
-import { latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type Thread, type Ticket, type TicketInput,
-  type Trigger, type TriggerDisposition } from '../core/index.ts'
+import { latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type OrchestratorDecision, type Thread, type Ticket,
+  type TicketInput, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
 
@@ -33,17 +33,30 @@ export function ticketCard(ticket: Ticket) {
 }
 /** Strips `policyVersion`, an internal hash that callers never query by. */
 const mandateOf = ({ policyVersion: _version, ...mandate }: Mandate) => mandate
-export const INPUTS = 10, ASSIGNMENTS = 3
+export const INPUTS = 10, ASSIGNMENTS = 3, ORCHESTRATOR_DECISIONS = 5
 const INPUT_TEXT = 80
 /** Summarizes a ticket input inline for short text or as a resource reference, omitting decision IDs for worker Sessions. */
 export function inputLine(ticket: Ticket, input: TicketInput, worker = false) {
   const read = { read: inputResource(ticket.id, input.id) }
   const names = input.kind === 'trigger' || input.kind === 'resumed' ? { trigger_id: input.triggerId }
     : input.kind === 'reopen' && !worker ? { decision_id: input.decisionId }
+    : input.kind === 'orchestrator-decision' ? (input.decision.length <= INPUT_TEXT
+      ? { decision: input.decision, ...read }
+      : { preview: preview(input.decision).slice(0, INPUT_TEXT), chars: input.decision.length, ...read })
     : input.kind !== 'text' ? read
     : input.text.length <= INPUT_TEXT ? { text: input.text }
     : { preview: preview(input.text).slice(0, INPUT_TEXT), chars: input.text.length, ...read }
   return { kind: input.kind, at: input.at, ...names, ...ticket.undelivered.includes(input.id) ? { undelivered: true } : {} }
+}
+/** Summarizes a recorded orchestrator decision with its question/context, decision, rationale, and full input resource. */
+export function orchestratorDecisionLine(ticket: Ticket, item: OrchestratorDecision) {
+  return {
+    id: item.id, at: item.at, stage: item.stage,
+    ...(item.question ? { question: item.question } : item.context ? { context: preview(item.context) } : {}),
+    decision: preview(item.decision),
+    rationale: preview(item.rationale),
+    read: inputResource(ticket.id, item.inputId),
+  }
 }
 export function assignmentLine(ticket: Ticket, item: Ticket['assignments'][number]) {
   return { id: item.id, state: item.state, at: item.createdAt, ...(item.endedReason ? { ended_reason: reasonText({ code: item.endedReason }) } : {}),
@@ -65,6 +78,10 @@ export function ticketDetails(ticket: Ticket, threads: TicketThread[], batch: re
     scope: ticket.mandate.scope, requested_by: ticket.mandate.actor.id,
     assignments: newestPage(ticket.assignments, 0, ASSIGNMENTS, item => assignmentLine(ticket, item), `ticket/${ticket.id}/assignments`),
     inputs: newestPage(ticket.inputs, 0, INPUTS, input => inputLine(ticket, input, worker), `ticket/${ticket.id}/inputs`),
+    ...(ticket.orchestratorDecisions?.length ? {
+      orchestrator_decisions: newestPage(ticket.orchestratorDecisions, 0, ORCHESTRATOR_DECISIONS,
+        item => orchestratorDecisionLine(ticket, item), `ticket/${ticket.id}/advances`),
+    } : {}),
     assignment: `ticket/${ticket.id}/assignment`, result: `ticket/${ticket.id}/result`, transcript: `ticket/${ticket.id}/transcript` }
 }
 

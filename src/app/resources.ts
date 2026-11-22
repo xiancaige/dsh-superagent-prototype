@@ -6,8 +6,8 @@ import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
-import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
-  ticketDetails, triggerCard, type TicketThread } from './cards.ts'
+import { ASSIGNMENTS, INPUTS, ORCHESTRATOR_DECISIONS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage,
+  orchestratorDecisionLine, preview, textPage, threadCard, ticketCard, ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
 import { transcriptEntry } from './context.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
@@ -33,6 +33,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
   { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
+  { name: 'ticket/<id>/advances', holds: 'orchestrator decisions recorded for this ticket, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
@@ -251,12 +252,15 @@ const ROUTES: readonly Route[] = [
         ...[...bound].filter(key => !subscribed.some(thread => thread.key === key)).map(key => marked(key, false))]
       return { ...ticketDetails(ticket, threads, batchOf(host, ticket), !!ticketId), ...retry }
     }
-    if (section === 'assignments' || section === 'inputs') {
+    if (section === 'assignments' || section === 'inputs' || section === 'advances') {
       if (part !== undefined) throw new Error('Unknown context resource')
-      const size = Math.min(read.limit ?? (section === 'assignments' ? ASSIGNMENTS : INPUTS), 50)
+      const defaultSize = section === 'assignments' ? ASSIGNMENTS : section === 'advances' ? ORCHESTRATOR_DECISIONS : INPUTS
+      const size = Math.min(read.limit ?? defaultSize, 50)
       const { items, next_offset } = section === 'assignments'
         ? newestPage(ticket.assignments, read.offset, size, item => assignmentLine(ticket, item), resource)
-        : newestPage(ticket.inputs, read.offset, size, input => inputLine(ticket, input, !!ticketId), resource)
+        : section === 'advances'
+          ? newestPage(ticket.orchestratorDecisions ?? [], read.offset, size, item => orchestratorDecisionLine(ticket, item), resource)
+          : newestPage(ticket.inputs, read.offset, size, input => inputLine(ticket, input, !!ticketId), resource)
       return { items, next_offset: next_offset ?? null }
     }
     let body: string

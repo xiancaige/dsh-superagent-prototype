@@ -16,7 +16,7 @@ import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
-import { Tickets } from './tickets.ts'
+import { Tickets, type AdvanceTicketInput, type AdvanceTicketResult } from './tickets.ts'
 import { Deliveries, type DeliveryLevel } from './delivery.ts'
 
 export type { EngineOptions } from './part.ts'
@@ -24,6 +24,7 @@ export type { WorkerReport } from './assignments.ts'
 export type { Outcome } from './evals.ts'
 export type { ReceiveResult } from './intake.ts'
 export type { Reply, ReplyRequest } from './replies.ts'
+export type { AdvanceTicketInput, AdvanceTicketResult } from './tickets.ts'
 
 /** What a worker says about the visual acceptance it performed; the host records, it does not judge. */
 export interface VisualRecordInput {
@@ -609,6 +610,13 @@ export class Engine {
    */
   note(ticketId: string, text: string): Ticket { return this.repo.atomic(() => this.tickets.note(ticketId, text)) }
   /**
+   * Record an orchestrator decision or simple push-forward within an open ticket's existing Mandate, clearing any active
+   * `attention` and delivering the decision to wake or steer the worker: see `Tickets.advance`.
+   */
+  advanceTicket(ticketId: string, input: AdvanceTicketInput): AdvanceTicketResult {
+    return this.repo.atomic(() => this.tickets.advance(ticketId, input))
+  }
+  /**
    * An Executor's hand-back of a message that reached its ticket but asks for more than it: see `Evals.handback`.
    * @returns whether it was queued for Eval: false while another ticket still decides it, and for one this ticket did not decide (see `Evals.handback`).
    * @throws UserError when the ticket or trigger is unknown, the trigger did not reach the ticket, or the ticket already handed it back.
@@ -666,7 +674,7 @@ export class Engine {
 /** What Sources ask and tell the Engine. */
 export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadClosed'>
 /** What the main Session asks of the Engine. */
-export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
+export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note' | 'advanceTicket'>
 /** What people ask of the Engine, through the panel or the main Session. */
 export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss' | 'configureValidation'
   | 'configureDesign' | 'approveDesign' | 'configureReview' | 'recordReview' | 'handOverEnvironment' | 'acquireEnvironment' | 'releaseEndedEnvironment' | 'configureDelivery' | 'reconcileDelivery' | 'recoverDeliveries' | 'deliveryState' | 'deliverTicket'>

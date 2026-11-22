@@ -130,7 +130,14 @@ export class Assignments extends EnginePart {
       const workflow = this.options.workflow?.(ticket)
       if (workflow) throw new Error(workflow)
     }
-    const at = this.now()
+    let at = this.now()
+    if (report.state === 'blocked' || report.state === 'failed') {
+      const lastDecisionAt = ticket.inputs.filter(item => item.kind === 'orchestrator-decision').at(-1)?.at
+      if (lastDecisionAt && at <= lastDecisionAt) {
+        const parsed = Date.parse(lastDecisionAt)
+        if (Number.isFinite(parsed)) at = new Date(parsed + 1).toISOString()
+      }
+    }
     const previous = ticket.attention
     const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
     const asked = report.question && report.question !== previous?.question ? ask(report.question) : previous

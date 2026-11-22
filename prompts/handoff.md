@@ -1,4 +1,5 @@
 Ticket handoff contract: a concrete decision from the original ticket owner is a structured attention request, not routine progress.
+Routine choices and simple continuations within the existing mandate may be decided and advanced by the orchestrator with a recorded rationale, reserving human attention for decisions that truly require the ticket owner.
 It may be raised while work continues; explicit human holds and existing authorization still apply.
 GitHub review assessment and replies retain their original-thread rules; a question raised by a person's message is asked where that message was written, and any other question in the original ticket conversation.
 Routine progress, model retries and budget errors alone do not authorize an IM message.

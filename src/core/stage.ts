@@ -16,6 +16,10 @@ export function ticketStage(ticket: Ticket): TicketStage {
   // A human follow-up after a blocked or failed report returns the ticket to the executor.
   if ((report === 'blocked' || report === 'failed') && waitsForPerson(ticket)) return { stage: 'person', action: report }
   if (!assignment || assignment.state === 'pending') return { stage: 'working', action: 'queued' }
+  if (report === 'waiting' && assignment.state === 'running' && assignment.report?.at
+    && ticket.inputs.some(input => input.kind === 'orchestrator-decision' && input.at > assignment.report!.at)) {
+    return { stage: 'working' }
+  }
   if (report === 'waiting' || assignment.state === 'ended') return { stage: 'idle' }
   return { stage: 'working' }
 }

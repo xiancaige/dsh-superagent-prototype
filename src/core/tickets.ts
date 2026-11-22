@@ -4,13 +4,18 @@ import { assertTicketValidated } from './validation.ts'
 import { UserError } from './errors.ts'
 import { ENVIRONMENT_BLOCK, blockedForEnvironment, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey,
   waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
+import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, OrchestratorDecision, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
-import { canRetry } from './stage.ts'
+import { canRetry, ticketStage } from './stage.ts'
 import { explicitTicketTarget } from './intake.ts'
+
+/** Input to advance an open ticket with an orchestrator decision within its existing Mandate. */
+export interface AdvanceTicketInput { decision: string; rationale: string }
+/** Result returned after recording and queuing an orchestrator decision on a ticket. */
+export interface AdvanceTicketResult { ticket: Ticket; decision: OrchestratorDecision; resolvedAttention?: string }
 
 const sameChannel = (a: ChannelRef, b: ChannelRef): boolean => JSON.stringify(a) === JSON.stringify(b)
 /** Whether an Input is a message no person wrote, such as CI's, a bot's, or the main Session's note. */
@@ -575,6 +580,70 @@ export class Tickets extends EnginePart {
     const at = this.now()
     this.addInput(ticket, { id: key('input', ticketId, 'note', at, text), kind: 'note', text, at })
     return this.require(ticketId)
+  }
+  /**
+   * Record an orchestrator decision or push-forward within an open ticket's existing Mandate, clear any open
+   * `ticket.attention` (withdrawing any unsent attention reply), and deliver the decision to wake or steer the worker.
+   * Refuses ended tickets, shared-environment lock waits, terminal model failures, design-blocked launches, and already-ready tickets.
+   */
+  advance(ticketId: string, input: AdvanceTicketInput): AdvanceTicketResult {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (blockedForEnvironment(ticket)) throw new UserError('advanceEnvironmentBlocked')
+    const latest = latestAssignment(ticket)
+    if (latest?.modelFailure?.hostResumeBudget === 0) throw new UserError('advanceModelFailure')
+    if (ticket.designApproval?.required && !ticket.designApproval.approval && latest?.state === 'pending') throw new UserError('advanceDesignBlocked')
+    if (latest?.report?.state === 'ready' && latest.report.completion !== 'implementation') throw new UserError('advanceAlreadyReady')
+    const decisionText = input.decision.trim(), rationaleText = input.rationale.trim()
+    if (!decisionText || !rationaleText) throw new UserError('advanceInvalid')
+    const stage = ticketStage(ticket)
+    const stageLabel = stage.stage === 'person' ? `${stage.stage}/${stage.action}`
+      : stage.stage === 'working' && stage.action ? `${stage.stage}/${stage.action}` : stage.stage
+    const previousAttention = ticket.attention
+    const context = !previousAttention ? latest?.report?.summary?.trim() : undefined
+    if (previousAttention) {
+      delete ticket.attention
+      this.replies.withdrawAttention(previousAttention.id)
+    }
+    let at = this.now()
+    const reportAt = latest?.report?.at
+    if (reportAt && at <= reportAt) {
+      const parsed = Date.parse(reportAt)
+      at = Number.isFinite(parsed) ? new Date(parsed + 1).toISOString() : `${reportAt}z`
+    }
+    const seq = (ticket.orchestratorDecisions?.length ?? 0) + 1
+    const decisionId = key('orch-decision', ticketId, String(seq), at)
+    const inputId = key('input', ticketId, 'orchestrator-decision', String(seq), at)
+    const record: OrchestratorDecision = {
+      id: decisionId,
+      at,
+      stage: stageLabel,
+      ...(previousAttention ? { attentionId: previousAttention.id, question: previousAttention.question } : {}),
+      ...(context ? { context: context.slice(0, 500) } : {}),
+      decision: decisionText,
+      rationale: rationaleText,
+      inputId,
+    }
+    ticket.orchestratorDecisions = [...ticket.orchestratorDecisions ?? [], record]
+    const ticketInput: TicketInput = {
+      id: inputId,
+      kind: 'orchestrator-decision',
+      decision: decisionText,
+      rationale: rationaleText,
+      ...(previousAttention ? { question: previousAttention.question } : {}),
+      at,
+    }
+    this.addInput(ticket, ticketInput)
+    const updated = this.require(ticketId)
+    const currentLatest = latestAssignment(updated)
+    if (!runningAssignment(updated) && currentLatest?.state !== 'pending') {
+      const assignment = this.newAssignment(updated)
+      updated.updatedAt = at
+      this.repo.tickets.save(updated)
+      this.options.executor.start(updated, assignment)
+    }
+    this.emit('ticket.advanced', { ticketId, decisionId, stage: stageLabel })
+    return { ticket: this.require(ticketId), decision: record, ...(previousAttention ? { resolvedAttention: previousAttention.question } : {}) }
   }
   /**
    * Subscribe an open ticket to a Thread its Executor found related, for context: see `Thread.context`.

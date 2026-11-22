@@ -19,7 +19,7 @@ const RoutingNoteSchema = z.string().trim()
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 export interface MainToolsHost {
   readonly context: Context
-  readonly engine: Pick<EngineForMainSession, 'candidate' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note' | 'advanceTicket'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
@@ -211,6 +211,26 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       execute: async args => {
         host.engine.note(args.ticket_id, args.text)
         return routed(host, { reason: 'Noted for the worker', ticketId: args.ticket_id })
+      },
+    }),
+    tool({
+      name: 'orchestrator_ticket_advance',
+      description: 'Decide a routine question or advance a paused, blocked, idle or working ticket within its existing mandate on behalf of the person, clearing any open attention question and recording the decision process (rationale) on the ticket. Cannot bypass shared environment locks, terminal model failures or host approval/validation gates.',
+      schema: z.object({
+        ticket_id: z.string().min(1).describe('The open ticket to decide or advance.'),
+        decision: z.string().trim().min(1).max(1000).describe('Concrete decision or instruction delivered to the worker to continue within the existing mandate.'),
+        rationale: z.string().trim().min(1).max(2000).describe('Recorded decision process: what arose, options or evidence weighed, why it fits the mandate, and why human escalation is unnecessary.'),
+      }).strict(),
+      execute: async args => {
+        const result = host.quietly(() => host.engine.advanceTicket(args.ticket_id, { decision: args.decision, rationale: args.rationale }))
+        host.requestPass()
+        return {
+          advanced: true,
+          decision_id: result.decision.id,
+          ...(result.resolvedAttention ? { resolved_attention: result.resolvedAttention } : {}),
+          reason: 'Recorded orchestrator decision and queued delivery to worker',
+          ticket: ticketCard(result.ticket),
+        }
       },
     }),
     tool({

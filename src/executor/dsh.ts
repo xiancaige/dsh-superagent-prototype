@@ -186,6 +186,13 @@ export function inputMessage(input: TicketInput, trigger?: object): string | und
   if (input.kind === 'policy-changed') return policyMessage(input.effect)
   if (input.kind === 'resumed') return RESUMED
   if (input.kind === 'note') return `Note from the orchestrator, for context only: ${input.text}`
+  if (input.kind === 'orchestrator-decision') return JSON.stringify({
+    kind: 'orchestrator-decision',
+    ...(input.question ? { question: input.question } : {}),
+    decision: input.decision,
+    rationale: input.rationale,
+    note: 'Orchestrator decision within the existing mandate. Follow this decision and continue; the decision process has been recorded on the ticket.',
+  })
   return input.kind === 'text' ? input.text : undefined
 }
 /**

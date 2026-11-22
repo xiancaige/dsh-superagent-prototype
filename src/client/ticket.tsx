@@ -24,6 +24,8 @@ function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: stri
       <div className="dt-row-meta">{input.kind === 'trigger' && <span>{valueLabel(t, 'input', input.kind)}</span>}<When
         at={input.at} /></div>
       {(input.kind === 'text' || input.kind === 'note') && input.text && <div className="dt-row-quote"><MarkdownLite text={input.text} /></div>}
+      {input.kind === 'orchestrator-decision' && <div className="dt-row-quote"><MarkdownLite
+        text={`**${t('orchestratorDecisionLabel')}：**${input.decision}\n\n**${t('orchestratorRationaleLabel')}：**${input.rationale}`} /></div>}
       {trigger?.handback && <Hint>{t('inputHandedBack', { reason: trigger.handback.reason })}</Hint>}
       <Earlier items={earlier} />
     </div>
@@ -163,6 +165,22 @@ export function TicketPage({ id }: { id: string }) {
     {data.threads.length > 0 && <Section title={t('subscribedThreads')} count={data.threads.length}>
       <ul className="dt-list">{data.threads.map(thread => <ThreadLine key={thread.key} thread={thread} ticketId={data.id}
         context={thread.context} />)}</ul>
+    </Section>}
+    {data.orchestratorDecisions && data.orchestratorDecisions.length > 0 && <Section title={t('orchestratorDecisions')}
+      count={data.orchestratorDecisions.length}>
+      <ul className="dt-list">{data.orchestratorDecisions.slice().reverse().map(item => <li key={item.id} className="dt-row">
+        <Dot state="idle" label={t('orchestratorDecisions')} />
+        <div className="dt-row-main">
+          <div className="dt-row-title">{item.decision}</div>
+          <div className="dt-row-meta">
+            <span>{t('orchestratorDecisionStage', { stage: item.stage })}</span>
+            <When at={item.at} />
+          </div>
+          {item.question && <Hint>{t('orchestratorDecisionQuestion', { question: item.question })}</Hint>}
+          {!item.question && item.context && <Hint>{t('orchestratorDecisionContext', { context: item.context })}</Hint>}
+          <div className="dt-row-quote"><MarkdownLite text={`**${t('orchestratorRationaleLabel')}：**${item.rationale}`} /></div>
+        </div>
+      </li>)}</ul>
     </Section>}
     <div className="dt-details">
       {/* A single Assignment adds nothing beyond the status line; list Assignments only once work has been resumed or handed over. */}
