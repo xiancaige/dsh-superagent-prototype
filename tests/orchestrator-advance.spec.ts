@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Engine, MemoryRepositories, UserError, key, ticketStage, waitsForPerson, type Assessor, type Candidate, type Executor, type Outcome,
   type Policy, type Trigger } from '../src/core/index.ts'
 import { ticketDetail } from '../src/app/views/tickets.ts'
+import { composePrompt, defaultPrompts } from '../src/app/prompts.ts'
+import { masterPrompt } from '../src/app/context.ts'
+import { promptFile } from '../src/app/skill-files.ts'
 import { phase2cHarness } from './fixtures/engine-harness.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -233,5 +236,20 @@ describe('orchestrator_ticket_advance runtime tool & resources', () => {
     const view = ticketDetail({ store: host.runtime.store, sources: host.runtime.sources, links: host.runtime.links() }, ticket.id)!
     expect(view.orchestratorDecisions).toHaveLength(1)
     expect(view.inputs[0]).toMatchObject({ kind: 'orchestrator-decision', delivered: true })
+  })
+})
+
+describe('prompt contracts for orchestrator advance and DSH restart verification', () => {
+  it('requires DSH restart and live verification before completion and assigns responsibility to the orchestrator', () => {
+    expect(masterPrompt.length).toBeLessThan(1400)
+    const orchestrator = composePrompt(defaultPrompts(), 'orchestrator')
+    const worker = composePrompt(defaultPrompts(), 'worker')
+    expect(orchestrator).toContain('orchestrator_ticket_advance')
+    expect(orchestrator).toContain('DSH plugin/prompt changes need DSH restart and live check before completion')
+    expect(promptFile('dispatch')).toContain('code and push alone are incomplete: never deliver completion before DSH restarts')
+    expect(promptFile('handoff-orchestrator')).toContain('ensuring DSH restarts and takes effect belongs to the orchestrator too')
+    expect(promptFile('handoff-worker')).toContain('while restart or live verification is still pending, do not report accepted completion')
+    expect(worker).toContain('必须完成构建部署、安全重启 DSH')
+    expect(orchestrator).toContain('主调度亦不得按已完成结单或向人报喜，而应由主调度负责推进或直接落实重启与生效验证')
   })
 })
