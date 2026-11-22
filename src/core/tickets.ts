@@ -1,7 +1,7 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { assertTicketValidated } from './validation.ts'
-import { UserError } from './errors.ts'
+import { UserError, type UserErrorCode } from './errors.ts'
 import { ENVIRONMENT_BLOCK, blockedForEnvironment, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey,
   waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, OrchestratorDecision, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
@@ -11,6 +11,21 @@ import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { canRetry, ticketStage } from './stage.ts'
 import { explicitTicketTarget } from './intake.ts'
+
+/**
+ * Returns the refusal error code if `ticket` cannot currently be advanced by `advanceTicket`, or `undefined` when it is advanceable.
+ */
+export function advanceRefusalCode(ticket: Ticket): UserErrorCode | undefined {
+  if (!liveTicket(ticket)) return 'ticketEnded'
+  if (blockedForEnvironment(ticket)) return 'advanceEnvironmentBlocked'
+  const latest = latestAssignment(ticket)
+  if (latest?.modelFailure?.hostResumeBudget === 0) return 'advanceModelFailure'
+  if (ticket.designApproval?.required && !ticket.designApproval.approval && latest?.state === 'pending') return 'advanceDesignBlocked'
+  if (latest?.report?.state === 'ready' && latest.report.completion !== 'implementation') return 'advanceAlreadyReady'
+  return undefined
+}
+/** True when `advanceTicket` can currently push `ticket` forward within its existing Mandate. */
+export const canAdvanceTicket = (ticket: Ticket): boolean => advanceRefusalCode(ticket) === undefined
 
 /** Input to advance an open ticket with an orchestrator decision within its existing Mandate. */
 export interface AdvanceTicketInput { decision: string; rationale: string }
@@ -588,12 +603,9 @@ export class Tickets extends EnginePart {
    */
   advance(ticketId: string, input: AdvanceTicketInput): AdvanceTicketResult {
     const ticket = this.require(ticketId)
-    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
-    if (blockedForEnvironment(ticket)) throw new UserError('advanceEnvironmentBlocked')
+    const refusal = advanceRefusalCode(ticket)
+    if (refusal) throw new UserError(refusal)
     const latest = latestAssignment(ticket)
-    if (latest?.modelFailure?.hostResumeBudget === 0) throw new UserError('advanceModelFailure')
-    if (ticket.designApproval?.required && !ticket.designApproval.approval && latest?.state === 'pending') throw new UserError('advanceDesignBlocked')
-    if (latest?.report?.state === 'ready' && latest.report.completion !== 'implementation') throw new UserError('advanceAlreadyReady')
     const decisionText = input.decision.trim(), rationaleText = input.rationale.trim()
     if (!decisionText || !rationaleText) throw new UserError('advanceInvalid')
     const stage = ticketStage(ticket)

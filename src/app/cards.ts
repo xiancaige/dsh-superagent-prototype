@@ -1,5 +1,5 @@
 /** Compact, bounded model-facing projections of triggers, tickets, threads, and decisions; full texts stay behind readable resources. */
-import { latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type OrchestratorDecision, type Thread, type Ticket,
+import { canAdvanceTicket, latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type OrchestratorDecision, type Thread, type Ticket,
   type TicketInput, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
@@ -60,8 +60,8 @@ export function orchestratorDecisionLine(ticket: Ticket, item: OrchestratorDecis
 }
 export function assignmentLine(ticket: Ticket, item: Ticket['assignments'][number]) {
   return { id: item.id, state: item.state, at: item.createdAt, ...(item.endedReason ? { ended_reason: reasonText({ code: item.endedReason }) } : {}),
-    ...(item.report ? { report: { state: item.report.state, at: item.report.at, preview: preview(item.report.summary).slice(0, 100),
-      chars: item.report.summary.length, read: `ticket/${ticket.id}/report/${item.id}` } } : {}) }
+    ...(item.report ? { report: { state: item.report.state, ...(item.report.completion ? { completion: item.report.completion } : {}),
+      at: item.report.at, preview: preview(item.report.summary).slice(0, 100), chars: item.report.summary.length, read: `ticket/${ticket.id}/report/${item.id}` } } : {}) }
 }
 export function newestPage<T, L>(items: readonly T[], offset: number, size: number, line: (item: T) => L, next: string) {
   const newest = items.slice().reverse()
@@ -75,6 +75,7 @@ export function ticketDetails(ticket: Ticket, threads: TicketThread[], batch: re
   const { preview: _preview, ...card } = ticketCard(ticket)
   return { ...card, trigger_id: ticket.origin.triggerId, ...batch.length ? { batch: batch.map(batchLine) } : {},
     ...worker ? {} : { decision_id: ticket.decisionId }, threads, directory: ticket.execution?.directory,
+    ...(!worker && canAdvanceTicket(ticket) ? { can_advance: true } : {}),
     scope: ticket.mandate.scope, requested_by: ticket.mandate.actor.id,
     assignments: newestPage(ticket.assignments, 0, ASSIGNMENTS, item => assignmentLine(ticket, item), `ticket/${ticket.id}/assignments`),
     inputs: newestPage(ticket.inputs, 0, INPUTS, input => inputLine(ticket, input, worker), `ticket/${ticket.id}/inputs`),

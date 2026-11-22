@@ -3,12 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { Engine, MemoryRepositories, UserError, key, ticketStage, waitsForPerson, type Assessor, type Candidate, type Executor, type Outcome,
+import { Engine, MemoryRepositories, UserError, canAdvanceTicket, key, ticketStage, waitsForPerson, type Assessor, type Candidate, type Executor, type Outcome,
   type Policy, type Trigger } from '../src/core/index.ts'
+import { resultRelay } from '../src/app/notices.ts'
 import { ticketDetail } from '../src/app/views/tickets.ts'
 import { composePrompt, defaultPrompts } from '../src/app/prompts.ts'
 import { masterPrompt } from '../src/app/context.ts'
-import { promptFile } from '../src/app/skill-files.ts'
+import { promptFile, supervisorSkill } from '../src/app/skill-files.ts'
 import { phase2cHarness } from './fixtures/engine-harness.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -240,6 +241,9 @@ describe('orchestrator_ticket_advance runtime tool & resources', () => {
 })
 
 describe('prompt contracts for orchestrator advance and DSH restart verification', () => {
+  let host: Host | undefined
+  afterEach(async () => { await host?.stop(); host = undefined })
+
   it('requires DSH restart and live verification before completion and assigns responsibility to the orchestrator', () => {
     expect(masterPrompt.length).toBeLessThan(1400)
     const orchestrator = composePrompt(defaultPrompts(), 'orchestrator')
@@ -251,5 +255,114 @@ describe('prompt contracts for orchestrator advance and DSH restart verification
     expect(promptFile('handoff-worker')).toContain('while restart or live verification is still pending, do not report accepted completion')
     expect(worker).toContain('必须完成构建部署、安全重启 DSH')
     expect(orchestrator).toContain('主调度亦不得按已完成结单或向人报喜，而应由主调度负责推进或直接落实重启与生效验证')
+  })
+
+  it('blocks premature result delivery on implementation completion and exposes completion + can_advance in relays', async () => {
+    host = await startRuntime()
+    const { ticket, trigger, sessionId } = await host.acceptedTicket(feishu('1', '@bot 启用测试工单跑完整流程'))
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'ready',
+      completion: 'implementation',
+      reply_to_trigger_id: trigger.id,
+      summary: '定位到下游解析报错，尚未修完。',
+    })
+    const stored = host.runtime.store.tickets.get(ticket.id)!
+    expect(canAdvanceTicket(stored)).toBe(true)
+    const relay = JSON.parse(resultRelay(stored, 'ready', '定位到下游解析报错，尚未修完。', trigger.id).text) as Record<string, unknown>
+    expect(relay).toMatchObject({
+      kind: 'worker_report',
+      state: 'ready',
+      completion: 'implementation',
+      can_advance: true,
+      answer_to: trigger.id,
+    })
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      ticket_id: ticket.id,
+      purpose: 'result',
+      text: '尚未完成。',
+    })).rejects.toThrow(/not ready/i)
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      trigger_id: trigger.id,
+      purpose: 'answer',
+      text: '已定位到下游报错，正在推进继续修复。',
+    })).resolves.toEqual({ status: 'sent' })
+
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'ready',
+      completion: 'accepted',
+      summary: '已修复并完成端到端验收。',
+    })
+    const completed = host.runtime.store.tickets.get(ticket.id)!
+    expect(canAdvanceTicket(completed)).toBe(false)
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      ticket_id: ticket.id,
+      purpose: 'result',
+      text: '已完成端到端验收。',
+    })).resolves.toEqual({ status: 'sent' })
+  })
+
+  it('force-injects dsh-superagent-supervisor skill on worker reports and nudges once if an advanceable ticket is left unacted', async () => {
+    host = await startRuntime()
+    const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 跑完整流程'))
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'ready',
+      completion: 'implementation',
+      summary: '发现下游解析 bug，停在半成品。',
+    })
+    await host.runtime.idle()
+
+    const masterAgent = host.agents.get(host.runtime.masterId)!
+    const masterCtx = (masterAgent as unknown as { ctx: import('@deepseek-ai/cordis').Context }).ctx
+    const relayMessage = masterAgent.inbox.nextStep.at(-1)!
+    const nonReportMessage = {
+      ...relayMessage,
+      content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'follow_up', trigger_id: 't1' }) }],
+    }
+
+    // Non-report messages do not inject the supervisor skill.
+    const skipped = await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [nonReportMessage], turn: 1, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [nonReportMessage] }),
+    ) as { kind: string; messages: { source: { kind: string; name?: string }; content: { text?: string }[] }[] }
+    expect(skipped.messages).toHaveLength(1)
+
+    // Worker report messages force-inject the dsh-superagent-supervisor skill block.
+    const entered = await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [relayMessage], turn: 2, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [relayMessage] }),
+    ) as { kind: string; messages: { source: { kind: string; name?: string }; content: { text?: string }[] }[] }
+    expect(entered.messages).toHaveLength(2)
+    expect(entered.messages[1]!.source).toMatchObject({ kind: 'skill-invocation', name: supervisorSkill.name })
+    expect(entered.messages[1]!.content[0]!.text).toContain('<skill_content name="dsh-superagent-supervisor">')
+    expect(entered.messages[1]!.content[0]!.text).toContain('orchestrator_ticket_advance')
+
+    // Trying to close the turn without acting steers exactly one supervisor_nudge.
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 2, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).toHaveBeenCalledTimes(1)
+    const nudgeText = (masterAgent.steer.mock.calls[0]![0].content[0] as { text: string }).text
+    const nudge = JSON.parse(nudgeText) as { kind: string; ticket_ids: string[] }
+    expect(nudge).toMatchObject({ kind: 'supervisor_nudge', ticket_ids: [ticket.id] })
+
+    // Repeated turn-stopping in the same turn does not loop.
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 2, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).toHaveBeenCalledTimes(1)
+
+    // Once the orchestrator advances the ticket, turn-stopping in a new turn stays quiet.
+    await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [relayMessage], turn: 3, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [relayMessage] }),
+    )
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Fix the downstream bug in extraction-llm.js and verify end-to-end.',
+      rationale: 'Implementation-only stop leaves the requested end-to-end flow broken; within mandate.',
+    })
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 3, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).not.toHaveBeenCalled()
   })
 })

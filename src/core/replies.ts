@@ -69,9 +69,11 @@ export class Replies extends EnginePart {
       : trigger ? this.ownedTicket(trigger, request.purpose) : undefined
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
-      const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
+      const report = ticket && liveTicket(ticket) ? latestAssignment(ticket)?.report : undefined
+      const implementationPending = report?.state === 'ready' && report.completion === 'implementation'
+      const reported = !!report && report.state === 'ready' && report.completion !== 'implementation'
       const resultIndex = ticket?.result ? ticket.assignments.findIndex(item => item.id === ticket.result!.assignmentId) : -1
-      const retained = outcome !== 'stopped' && outcome !== 'closed' && resultIndex >= 0
+      const retained = outcome !== 'stopped' && outcome !== 'closed' && resultIndex >= 0 && !implementationPending
       const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported || retained
       if (!ticket || !ready) throw new UserError('notReady')
       // Validate a delayed finished result against its original assignment, not the follow-up's new one.

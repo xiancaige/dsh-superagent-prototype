@@ -1,12 +1,13 @@
 /** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { MessageId } from '@deepseek-ai/dsh-llm'
+import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import { createUserMessage, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { key, liveTicket, type Ticket } from '../core/index.ts'
+import { canAdvanceTicket, key, latestReport, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -14,7 +15,7 @@ import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
-import { bundledSkills } from './skill-files.ts'
+import { bundledSkills, supervisorSkill } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
@@ -24,7 +25,7 @@ import type { RegisterTool, Tool } from './tools/tool.ts'
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
-  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
+  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'> & { triggers?: Pick<Store['triggers'], 'disposition'> }
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
@@ -86,6 +87,28 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
   }
   if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
   return undefined
+}
+
+function supervisorReports(messages: readonly UserMessage[]): { inject: boolean; ticketIds: string[] } {
+  let inject = false
+  const ticketIds: string[] = []
+  for (const message of messages) {
+    const source = message.source as { kind?: unknown; plugin?: unknown }
+    if (source.kind !== 'dsh-superagent' && !(source.kind === 'plugin' && source.plugin === 'dsh-superagent')) continue
+    for (const block of message.content) {
+      if (block.type !== 'text') continue
+      try {
+        const parsed = JSON.parse(block.text) as { kind?: unknown; ticket?: { ticket_id?: unknown } }
+        if (parsed.kind === 'worker_report' || parsed.kind === 'worker_attention') {
+          inject = true
+          if (typeof parsed.ticket?.ticket_id === 'string') ticketIds.push(parsed.ticket.ticket_id)
+        } else if (parsed.kind === 'supervisor_nudge') {
+          inject = true
+        }
+      } catch { /* Non-JSON message: ignore. */ }
+    }
+  }
+  return { inject, ticketIds }
 }
 
 /**
@@ -266,20 +289,107 @@ export class Sessions {
     const skillScope = agent.ctx.inject(['skills'], scope => {
       binding.scope = scope
       binding.skills = undefined
-      this.bindSkills(binding, host.prompts.current())
+      this.bindSkills(binding, host.prompts.current(), master)
     })
     binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
     await skillScope
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
+    let turnNumber = 0
+    let nudgedThisTurn = false
+    const turnTickets = new Set<string>()
+    const actedTickets = new Set<string>()
+    const recordAction = (toolName: string, rawArgs: unknown, output: unknown): void => {
+      if (!master) return
+      const args = (rawArgs ?? {}) as Record<string, unknown>
+      if ((toolName === 'orchestrator_ticket_advance' || toolName === 'orchestrator_ticket_retry') && typeof args.ticket_id === 'string') {
+        actedTickets.add(args.ticket_id)
+      } else if (toolName === 'orchestrator_reply') {
+        if (typeof args.ticket_id === 'string') actedTickets.add(args.ticket_id)
+        else if (typeof args.trigger_id === 'string') {
+          const fanout = host.store.triggers?.disposition(args.trigger_id)?.fanout ?? []
+          for (const tid of fanout) if (turnTickets.has(tid)) actedTickets.add(tid)
+          if (!fanout.length) for (const tid of turnTickets) actedTickets.add(tid)
+        }
+      } else if (toolName === 'orchestrator_route' && Array.isArray(args.decisions)) {
+        const results = (output as { results?: Array<{ decision?: unknown }> } | undefined)?.results ?? []
+        for (let i = 0; i < args.decisions.length; i++) {
+          const item = args.decisions[i] as { kind?: unknown; ticket_id?: unknown } | undefined
+          if (item?.kind === 'stop' && typeof item.ticket_id === 'string' && results[i]?.decision === 'stop') actedTickets.add(item.ticket_id)
+        }
+      }
+    }
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, async (args, signal) => {
+      const output = await tool.execute(args, signal)
+      recordAction(tool.name, args, output)
+      return output
+    })
     if (master) {
       const parent = scopeParentOf(agent)
       const allow = ['skill', 'bash', 'pwsh', 'read', 'read_image', 'job_output', 'job_list', 'job_kill']
         .filter(name => agent.ctx.tools.get(name, parent))
-      binding.disposers.push(agent.ctx.tools.restrict({ allow }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+      binding.disposers.push(
+        agent.ctx.tools.restrict({ allow }),
+        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))),
+        // Force-inject the supervisor checklist whenever a worker report or attention arrives on the main Session.
+        agent.ctx.on('agent/pre-step', async ({ messages, turn, signal }, next): Promise<PreStepDecision> => {
+          const decision = await next()
+          if (decision.kind === 'reject') return decision
+          if (turn !== turnNumber) {
+            turnNumber = turn
+            nudgedThisTurn = false
+            turnTickets.clear()
+            actedTickets.clear()
+          }
+          const reports = supervisorReports(messages)
+          for (const tid of reports.ticketIds) turnTickets.add(tid)
+          if (!reports.inject) return decision
+          if (decision.messages.some(message => message.source.kind === 'skill-invocation' && message.source.name === supervisorSkill.name)) {
+            return decision
+          }
+          signal.throwIfAborted()
+          let loaded: { name: string; provider: string; content: string; resourceBase?: { kind: 'directory'; path: string } } = {
+            name: supervisorSkill.name, provider: 'runtime', content: supervisorSkill.content,
+            resourceBase: { kind: 'directory', path: dirname(supervisorSkill.path) },
+          }
+          try {
+            const workingDirectory = agent.ctx.get('workingDirectory') as { ensure?: (agent: Agent, signal: AbortSignal) => Promise<string> } | undefined
+            const skills = agent.ctx.get('skills') as { get?: (name: string, lookup: unknown) => Promise<typeof loaded | undefined> } | undefined
+            if (typeof skills?.get === 'function') {
+              const cwd = typeof workingDirectory?.ensure === 'function' ? await workingDirectory.ensure(agent, signal) : agent.session.header.cwd
+              const found = await skills.get(supervisorSkill.name, { cwd, signal, scope: agent })
+              if (found) loaded = found
+            }
+          } catch { /* Fall back to the packaged supervisor skill if optional services are absent. */ }
+          const injected = createUserMessage({
+            content: [{ type: 'text', text: renderSkillContent(loaded) }],
+            source: { kind: 'skill-invocation', name: supervisorSkill.name, form: 'instructions' },
+          })
+          return { ...decision, messages: [...decision.messages, injected] }
+        }),
+        // If the orchestrator tries to end a turn after receiving an advanceable worker report without advancing or escalating, steer once.
+        agent.ctx.on('agent/turn-stopping', () => {
+          if (nudgedThisTurn || !turnTickets.size) return
+          const pending = [...turnTickets].filter(id => {
+            if (actedTickets.has(id)) return false
+            const current = host.store.tickets.get(id)
+            if (!current || !canAdvanceTicket(current)) return false
+            const state = latestReport(current)?.state
+            return state === 'waiting' || state === 'blocked' || state === 'failed' || state === 'ready'
+          })
+          if (!pending.length) return
+          nudgedThisTurn = true
+          agent.steer(createUserMessage({
+            content: [{ type: 'text', text: JSON.stringify({
+              kind: 'supervisor_nudge',
+              ticket_ids: pending,
+              action: 'Advanceable worker report(s) received in this turn were left unacted. Follow the injected dsh-superagent-supervisor skill: call orchestrator_ticket_advance to push the worker toward goal completion, or escalate with orchestrator_reply if a hard gate or repeated unchanged blocker requires human action.',
+            }) }],
+            source: { kind: 'dsh-superagent', form: 'relay' },
+          }))
+        }),
+      )
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
@@ -329,7 +439,7 @@ export class Sessions {
     this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
-  private bindSkills(binding: SessionBinding, version: PromptVersion): void {
+  private bindSkills(binding: SessionBinding, version: PromptVersion, master = false): void {
     const { scope, skills: previous } = binding
     if (!scope || previous?.revision === version.revision) return
     previous?.dispose()
@@ -341,6 +451,10 @@ export class Sessions {
       disposers.push(scope.skills.register({ name: `${SKILL_PREFIX}${name}`, description, content, source: 'runtime',
         ...(bundled ? { resourceBase: { kind: 'directory' as const, path: dirname(bundled.path) } } : {}) }))
     }
+    if (master) {
+      disposers.push(scope.skills.register({ name: supervisorSkill.name, description: supervisorSkill.description, content: supervisorSkill.content,
+        source: 'runtime', resourceBase: { kind: 'directory' as const, path: dirname(supervisorSkill.path) } }))
+    }
     binding.skills = { revision: version.revision, dispose: () => { disposers.forEach(dispose => dispose()) } }
   }
   /** Return the current prompt version, updating the agent's skills and recording the revision in Store when bound to a model request. */
@@ -348,7 +462,7 @@ export class Sessions {
     const version = this.host.prompts.current()
     if (!bind) return version
     const binding = this.bindings.get(agent)
-    if (binding) this.bindSkills(binding, version)
+    if (binding) this.bindSkills(binding, version, agent.id === this.host.masterId)
     const { store } = this.host
     const revisions = store.get(KV.sessions.prompts(agent.id)) ?? []
     const bound = [...revisions.filter(revision => revision !== version.revision), version.revision]
