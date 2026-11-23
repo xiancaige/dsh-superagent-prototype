@@ -40,6 +40,7 @@ import { HealthBoard } from '../infra/health.ts'
 import { Mirror } from './mirror.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
+import { FeishuProgressSync } from './progress-sync.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
@@ -144,6 +145,7 @@ export class Runtime extends Service implements SourceHost {
   readonly outbox: Outbox
   readonly engine: Engine
   readonly passes: Passes
+  readonly progressSync: FeishuProgressSync
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
@@ -321,6 +323,8 @@ export class Runtime extends Service implements SourceHost {
       // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat (see `Mirror`).
       const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, mirror, paused: () => this.paused() })
+      this.progressSync = new FeishuProgressSync({ context: ctx, store, sources, outbox, mirror,
+        configured: () => setup.configured(), paused: () => this.paused(), closing: () => this.closing() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       // Phase 2 C: the environment is composed before any editor recovery, which borrows its one lock.
@@ -376,6 +380,7 @@ export class Runtime extends Service implements SourceHost {
           // survive restart, and never ask a broadcast listener or an LLM to notice the end.
           if (event.type === 'ticket.ended') {
             const { ticketId, by, outcome, reason } = event.data
+            store.delete(KV.feishu.progressSync(ticketId))
             const command = store.settings().executor.finalize.trim()
             if (outcome === 'completed' && command && machine.workspaceMode !== 'source') {
               effects.enqueue('finalize', ticketId, { ticketId, endedAt: store.tickets.get(ticketId)!.ended!.at, command })
@@ -460,6 +465,7 @@ export class Runtime extends Service implements SourceHost {
     this.executor.resume()
     this.passes.start()
     this.effects.start()
+    this.progressSync.start()
     // Phase 2 C: a restarted host keeps the ticket that holds the environment: its persisted lease is
     // re-taken by this process and beaten, so waiting, idling and restarting never free it.
     this.environmentHosted?.broker.wake()
@@ -546,6 +552,7 @@ export class Runtime extends Service implements SourceHost {
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    await this.progressSync.stop()
     // The environment lease outlives the host: the heartbeat stops, the record stays for the next start.
     if (this.environmentTimer) { clearInterval(this.environmentTimer); this.environmentTimer = undefined }
     this.environmentHosted?.broker.halt()

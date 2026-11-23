@@ -21,6 +21,7 @@ const MembersSchema = z.looseObject({
 const FeishuConfigSchema = FeishuBotSchema.extend({
   readPageSize: z.number().int().min(1).max(50).default(20),
   linkTimeoutMs: z.number().int().min(1).max(90000).default(5000),
+  progressIntervalSeconds: z.number().int().min(0).max(3600).default(180),
   chats: z.array(z.object({ chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), name: z.string().trim().max(60).optional(), listen: z.enum(['mentions', 'all']) }).strict())
     .refine(chats => new Set(chats.map(chat => chat.chatId)).size === chats.length, 'Duplicate chat IDs')
     .default([]),
@@ -51,6 +52,8 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
     { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
+    { key: 'progressIntervalSeconds', type: 'number', advanced: true, min: 0, max: 3600, label: { zh: '长任务进度同步间隔 / 秒', en: 'Long-task progress sync interval / seconds' },
+      hint: { zh: '工单持续执行超过该时长后，每隔此间隔向飞书同步一次中间进度；设为 0 则关闭。', en: 'Periodically syncs intermediate progress to Feishu while a ticket works past this interval; 0 disables it.' } },
   ],
   health: ['feishu', 'history'],
   scope({ meta }, config) {

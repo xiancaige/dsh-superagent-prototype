@@ -58,7 +58,9 @@ export const KV = {
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:'),
     /** A ticket that started outside Feishu, mirrored into a Feishu topic: the topic's root message, by ticket and by message. */
     mirror: family<FeishuMirror, [ticket: string]>('feishu-mirror:'),
-    mirrorRoot: family<FeishuMirror, [message: string]>('feishu-mirror-root:') },
+    mirrorRoot: family<FeishuMirror, [message: string]>('feishu-mirror-root:'),
+    /** Per-ticket state for periodic long-task progress sync messages sent to Feishu. */
+    progressSync: family<FeishuProgressSyncState, [ticket: string]>('feishu-progress-sync:') },
   /**
    * WeCom intelligent-bot Source: the chats seen (`true` for direct messages); the `req_id` of each message it replies to,
    * which the long connection keeps for 48 hours and a retried send reuses as its idempotency key; and, per chat, the
@@ -69,3 +71,5 @@ export const KV = {
 }
 /** Where a ticket's Feishu topic is: its root message, and the ticket's own Thread that replies in the topic are rewritten to. */
 export interface FeishuMirror { ticketId: string; chatId: string; messageId: string; direct: boolean; thread: { source: string; id: string } }
+/** Per-ticket state for periodic Feishu intermediate progress synchronization. */
+export interface FeishuProgressSyncState { assignmentId: string; lastSentAt: number; syncCount: number; lastReceiptIds?: string[] }

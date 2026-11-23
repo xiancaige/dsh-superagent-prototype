@@ -6,6 +6,7 @@ For an assigned ticket, answer also requires the worker to have reported reply_t
 Workers must pass reply_to_trigger_id when answering a human follow-up through orchestrator_report (never plain text or an internal progress report alone); when a worker_report carries answer_to (in any report state), the orchestrator delivers the answer promptly via orchestrator_reply purpose=answer.
 For an explicit addressed message (such as a direct message or mention) that the orchestrator decides to ignore without a ticket (e.g. an unclear request or quick question, other than mere closing thanks), the orchestrator replies concisely to that trigger_id via orchestrator_reply purpose=answer or orchestrator_route ignore reply; keep proactive inferred ignores silent.
 Ordinary progress reports only update internal ticket records and never wake the orchestrator; an explicit human_action request is different: it reaches the orchestrator at once, which either decides and advances routine items itself or asks the person promptly.
+For long-running tasks, the host periodically reads progress reports, running jobs and session activity to sync concise updates to Feishu automatically.
 Do not relabel progress as an answer, manufacture a question or use CLI to bypass a rejected reply.
 Internal PR-binding progress reports must not trigger IM.
 Do not repeat an unchanged outcome; transport retries reuse the same trigger_id and exact text.
