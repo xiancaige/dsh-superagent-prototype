@@ -75,14 +75,25 @@ export class AgentDelivery {
     if (this.ctx.agents.get(agent.id) !== agent) throw new Error('Delivery target was disposed')
     authorize?.()
     const id = messageId(requestId)
-    const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(message => deliveryId(message) === id)
-    if (!seen.ids.has(id) && !pending) {
-      const source = typeof mode === 'object' ? { kind: 'dsh-superagent' as const, form: 'notice' as const, summary: mode.inject }
-        : { kind: 'dsh-superagent' as const, form: 'relay' as const }
-      const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
-      if (typeof mode === 'object') { agent.inject(message); seen.ids.add(id) }
-      else if (mode === 'steer') agent.steer(message)
-      else agent.followup(message)
+    const pendingMessage = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].find(message => deliveryId(message) === id)
+    if (!seen.ids.has(id)) {
+      if (!pendingMessage) {
+        const source = typeof mode === 'object' ? { kind: 'dsh-superagent' as const, form: 'notice' as const, summary: mode.inject }
+          : { kind: 'dsh-superagent' as const, form: 'relay' as const }
+        const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
+        if (typeof mode === 'object') { agent.inject(message); seen.ids.add(id) }
+        else if (mode === 'steer') agent.steer(message)
+        else agent.followup(message)
+      } else if (typeof mode !== 'object' && agent.status === 'idle' && typeof agent.inbox.remove === 'function') {
+        // A turn that failed or aborted with keepInbox leaves the pending message stranded in inbox on an idle agent;
+        // removing and re-queuing wakes the driver without duplicating the message.
+        if (agent.inbox.remove(pendingMessage.id)) {
+          const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }],
+            source: { kind: 'dsh-superagent' as const, form: 'relay' as const } })
+          if (mode === 'steer') agent.steer(message)
+          else agent.followup(message)
+        }
+      }
     }
     accepted?.()
     await this.ctx.sessionPersistence.flush()

@@ -5,14 +5,22 @@ import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-sessi
 import { expect, it, vi } from 'vitest'
 import { AgentDelivery } from '../src/app/delivery.ts'
 
-function fixture(history: UserMessage[] = []) {
+function fixture(history: UserMessage[] = [], initialStatus?: 'idle' | 'running') {
   const ctx = new Context()
-  const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[] }
-  const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
-  const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
+  const inbox = {
+    nextTurn: [] as UserMessage[],
+    nextStep: [] as UserMessage[],
+    remove: vi.fn((id: string) => [inbox.nextTurn, inbox.nextStep].some(list => {
+      const idx = list.findIndex(item => item.id === id)
+      if (idx >= 0) list.splice(idx, 1)
+      return idx >= 0
+    })),
+  }
+  const agent = { id: SessionId('delivery-test'), session: {}, inbox, status: initialStatus } as unknown as Agent & { status?: string }
+  const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message); if (agent.status !== undefined) agent.status = 'running' })
+  const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message); if (agent.status !== undefined) agent.status = 'running' })
   const injected = vi.fn((_message: UserMessage) => {})
-  // Only the delivery-facing Agent methods participate in this fixture.
-  const agent = { id: SessionId('delivery-test'), session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
+  Object.assign(agent, { steer, followup, inject: injected })
   const event = (message: UserMessage): SessionEvent => ({ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: message })
   const read = vi.fn(async (offset: number, length: number) => ({ events: history.slice(offset, offset + length).map(event) }))
   const close = vi.fn(async () => {})
@@ -166,4 +174,30 @@ it('tells whether the Session holds a message: one waiting in its inbox, one it 
   expect([f.inbox.nextStep.length, await f.holds('request')]).toEqual([0, true])
   const restored = fixture([f.steer.mock.calls[0]![0]])
   expect([await restored.holds('request'), await restored.holds('other')]).toEqual([true, false])
+})
+
+it.each(['steer', 'queue'] as const)('wakes an idle agent whose %s message was left pending in inbox after a failed turn', async mode => {
+  const f = fixture([], 'running')
+  await f.send('request', mode)
+  const target = mode === 'steer' ? f.steer : f.followup
+  expect(target).toHaveBeenCalledOnce()
+
+  // While running, a retry does not re-insert or disturb the pending inbox item.
+  await f.send('request', mode)
+  expect(target).toHaveBeenCalledOnce()
+  expect(f.inbox.remove).not.toHaveBeenCalled()
+
+  // Simulate turn/end error leaving the agent idle with the message still stranded in inbox.
+  ;(f.agent as { status?: string }).status = 'idle'
+  await f.send('request', mode)
+  expect(f.inbox.remove).toHaveBeenCalledOnce()
+  expect(target).toHaveBeenCalledTimes(2)
+  expect(f.agent.status).toBe('running')
+  expect((mode === 'steer' ? f.inbox.nextStep : f.inbox.nextTurn)).toHaveLength(1)
+
+  // Injecting a passive notice never wakes an idle agent even when an item is pending.
+  ;(f.agent as { status?: string }).status = 'idle'
+  await f.inject('request', 'Passive notice')
+  expect(f.injected).not.toHaveBeenCalled()
+  expect(f.agent.status).toBe('idle')
 })

@@ -34,6 +34,7 @@ export interface SessionsHost {
   readonly masterId: string
   readonly lifetime: AbortSignal
   closing(): boolean
+  paused?(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
@@ -123,6 +124,9 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  private masterWakeTimer?: ReturnType<typeof setTimeout>
+  private masterWakeAttempts = 0
+  private masterLastEndError = false
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -135,6 +139,7 @@ export class Sessions {
   install(): void {
     const ctx = this.ctx
     ctx.on('agent/disposed', ({ agent }) => {
+      if (agent.id === this.host.masterId) this.clearMasterWake()
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
     })
@@ -144,6 +149,14 @@ export class Sessions {
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
+      if (agent.id === this.host.masterId && event.type === 'turn/end') {
+        if (event.data.reason.kind === 'error') {
+          this.masterLastEndError = true
+        } else {
+          this.masterLastEndError = false
+          this.masterWakeAttempts = 0
+        }
+      }
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
@@ -159,8 +172,37 @@ export class Sessions {
       })
     })
     ctx.on('agent/status', ({ agent, status }) => {
+      if (agent.id === this.host.masterId) {
+        if (status === 'running') this.clearMasterWake()
+        else if (status === 'idle' && !this.host.closing() && this.masterLastEndError) this.scheduleMasterWake(agent)
+      }
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
+  }
+  private clearMasterWake(): void {
+    if (!this.masterWakeTimer) return
+    clearTimeout(this.masterWakeTimer)
+    this.masterWakeTimer = undefined
+  }
+  private scheduleMasterWake(agent: Agent, overrideDelayMs?: number): void {
+    if (this.masterWakeTimer || this.host.closing()) return
+    if (agent.status !== 'idle') return
+    if (!agent.inbox.nextStep.length && !agent.inbox.nextTurn.length) return
+    if (typeof agent.inbox.remove !== 'function') return
+    const delayMs = overrideDelayMs ?? Math.min(60_000, 5_000 * 2 ** Math.min(this.masterWakeAttempts++, 4))
+    this.masterWakeTimer = setTimeout(() => {
+      this.masterWakeTimer = undefined
+      if (this.host.closing() || agent.status !== 'idle') return
+      if (this.ctx.agents.get(agent.id) !== agent) return
+      if (this.host.paused?.()) { this.scheduleMasterWake(agent, 30_000); return }
+      const message = agent.inbox.nextStep[0] ?? agent.inbox.nextTurn[0]
+      if (!message) return
+      const isNextStep = agent.inbox.nextStep[0] === message
+      if (!agent.inbox.remove(message.id)) return
+      if (isNextStep) agent.steer(message)
+      else agent.followup(message)
+    }, delayMs)
+    this.masterWakeTimer.unref?.()
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   /**
@@ -288,6 +330,11 @@ export class Sessions {
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
+    if (master) {
+      const lastTurnEnd = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
+      this.masterLastEndError = lastTurnEnd?.type === 'turn/end' && lastTurnEnd.data.reason.kind === 'error'
+      if (this.masterLastEndError && agent.status === 'idle') this.scheduleMasterWake(agent)
+    }
     // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
     binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
       const version = this.promptFor(agent, context.signal !== undefined)
@@ -502,5 +549,5 @@ export class Sessions {
     }
   }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
-  dispose(): void { for (const agent of [...this.bindings.keys()]) this.release(agent) }
+  dispose(): void { this.clearMasterWake(); for (const agent of [...this.bindings.keys()]) this.release(agent) }
 }
