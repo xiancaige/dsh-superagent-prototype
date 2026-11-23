@@ -29,7 +29,7 @@ export const WorkflowPolicySchema = z.object({
 export type WorkflowPolicy = z.infer<typeof WorkflowPolicySchema>
 export interface WorkflowSnapshot {
   policy: WorkflowPolicy
-  repositories: { root: string; head: string }[]
+  repositories: { root: string; head: string; upstream?: string; upstreamHead?: string }[]
   /** Line coverage from successful read results, never the worker's report. */
   reads: Record<string, Record<string, string>>
   skills: string[]
@@ -46,6 +46,65 @@ const inside = (root: string, file: string): boolean => {
   return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
 }
 
+const quietGit: WorkflowGit = (directory, args) => execFileSync('git', ['-C', directory, ...args], {
+  encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+})
+
+function tryGit(run: WorkflowGit, directory: string, args: string[]): string | undefined {
+  try {
+    return (run === git ? quietGit(directory, args) : run(directory, args)).trim()
+  } catch { return undefined }
+}
+
+/** Resolve the remote tracking ref a worktree repo compares against (`@{upstream}`, else `origin/<default>`), if present. */
+function trackingRef(run: WorkflowGit, directory: string): string | undefined {
+  const upstream = tryGit(run, directory, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
+  if (upstream) return upstream
+  const originHead = tryGit(run, directory, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'])
+  if (originHead?.startsWith('refs/remotes/')) return originHead.slice('refs/remotes/'.length)
+  for (const candidate of ['origin/main', 'origin/tp/main', 'origin/master']) {
+    if (tryGit(run, directory, ['rev-parse', '--verify', `refs/remotes/${candidate}^{commit}`])) return candidate
+  }
+  return undefined
+}
+
+/**
+ * Determine the effective baseline commit for `repo` at verification time:
+ * - Normally `repo.head` (the frozen start commit) is an ancestor of `HEAD` or we haven't rebased.
+ * - After a rebase/fast-forward onto newer upstream commits, `repo.head` is no longer an ancestor of `HEAD`
+ *   (or `HEAD` moved purely by advancing along upstream): exclude upstream commits reachable from the remote
+ *   tracking branch (`merge-base(HEAD, upstream)`) so unrelated remote changes brought in by rebase do not
+ *   trigger rules or CQTest gates for this ticket.
+ * - Fail closed if a git check indicates tampering or an unreadable tree; only advance baseline past commits
+ *   verified to belong to the upstream tracking branch that are also strictly newer than (or diverged from) `repo.head`.
+ */
+function effectiveBase(run: WorkflowGit, directory: string, repo: WorkflowSnapshot['repositories'][number]): string {
+  const headOk = tryGit(run, directory, ['merge-base', '--is-ancestor', repo.head, 'HEAD']) !== undefined
+  if (headOk) {
+    // Even if `repo.head` is an ancestor (e.g. a fast-forward merge from origin/main), if HEAD has merged/ff'd
+    // remote commits after `repo.head` that are on `upstream`, check `merge-base(HEAD, upstream)`.
+    const upstream = repo.upstream ?? trackingRef(run, directory)
+    if (!upstream) return repo.head
+    const mergeBase = tryGit(run, directory, ['merge-base', 'HEAD', upstream])
+    if (!mergeBase || mergeBase === repo.head) return repo.head
+    // Only advance the diff baseline to `mergeBase` when `repo.head` is an ancestor of `mergeBase`
+    // (meaning the upstream branch itself moved forward and was fast-forwarded/merged into this branch).
+    if (tryGit(run, directory, ['merge-base', '--is-ancestor', repo.head, mergeBase]) !== undefined) return mergeBase
+    return repo.head
+  }
+  // Rebased onto newer upstream: `repo.head` is no longer an ancestor of `HEAD`.
+  const upstream = repo.upstream ?? trackingRef(run, directory)
+  if (!upstream) return repo.head
+  const mergeBase = tryGit(run, directory, ['merge-base', 'HEAD', upstream])
+  if (!mergeBase) return repo.head
+  // Verify `mergeBase` actually descends from the original baseline (or the original upstream head if recorded)
+  // so an attacker cannot switch `origin/main` to an arbitrary unrelated branch; normal rebase onto newer `origin/main`
+  // satisfies `repo.head` <= `mergeBase` (when rebased onto a descendant of the start commit).
+  if (tryGit(run, directory, ['merge-base', '--is-ancestor', repo.head, mergeBase]) !== undefined) return mergeBase
+  if (repo.upstreamHead && tryGit(run, directory, ['merge-base', '--is-ancestor', repo.upstreamHead, mergeBase]) !== undefined) return mergeBase
+  return repo.head
+}
+
 /** Read policy only from the host-resolved source checkout, never worker-supplied paths. */
 export function captureWorkflow(source: string, workspace: string, run: WorkflowGit = git): WorkflowSnapshot | undefined {
   const file = path.join(source, POLICY)
@@ -57,7 +116,9 @@ export function captureWorkflow(source: string, workspace: string, run: Workflow
     const directory = path.resolve(workspace, root)
     if (!inside(realpathSync(workspace), realpathSync(directory))) throw new Error(`Workflow repository escapes workspace: ${root}`)
     const head = run(directory, ['rev-parse', '--verify', 'HEAD']).trim()
-    repositories.push({ root, head })
+    const upstream = trackingRef(run, directory)
+    const upstreamHead = upstream ? tryGit(run, directory, ['rev-parse', '--verify', `refs/remotes/${upstream}^{commit}`]) : undefined
+    repositories.push({ root, head, ...(upstream ? { upstream } : {}), ...(upstreamHead ? { upstreamHead } : {}) })
     // Gitlinks are authoritative, including nested submodules; use NUL records for paths containing spaces.
     for (const entry of run(directory, ['ls-files', '--stage', '-z']).split('\0')) {
       if (!entry.startsWith('160000 ')) continue
@@ -113,7 +174,8 @@ export function workflowReason(ticket: Ticket, run: WorkflowGit = git): string |
     for (const repo of snapshot.repositories) {
       const directory = path.resolve(workspace, repo.root)
       if (!inside(realpathSync(workspace), realpathSync(directory))) throw new Error(`Repository escapes workspace: ${repo.root}`)
-      const files = run(directory, ['diff', '--name-only', '--no-renames', '-z', repo.head, '--'])
+      const base = effectiveBase(run, directory, repo)
+      const files = run(directory, ['diff', '--name-only', '--no-renames', '-z', base, '--'])
         + run(directory, ['ls-files', '--others', '--exclude-standard', '-z'])
       for (const file of files.split('\0').filter(Boolean)) changed.add(slash(path.join(repo.root, file)))
     }

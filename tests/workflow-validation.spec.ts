@@ -112,6 +112,72 @@ describe('host workflow evidence', () => {
     writeFileSync(path.join(root, 'unrelated.ts'), 'tooling')
     expect(workflowReason(ticket)).toBeUndefined()
   })
+  it('ignores upstream game-code commits brought in via rebase and push when the ticket itself changed no cqtestPaths', () => {
+    const remote = scratch()
+    git(remote, 'init', '--bare', '-b', 'main')
+    const peer = scratch()
+    git(peer, 'clone', remote, '.')
+    mkdirSync(path.join(peer, '.dsh'))
+    mkdirSync(path.join(peer, 'tools'))
+    writeFileSync(path.join(peer, 'tools/a.ts'), 'initial')
+    writeFileSync(path.join(peer, '.dsh/workflow-validation.json'), JSON.stringify({
+      version: 1,
+      cqtestPaths: ['Source/'],
+      rules: [],
+    }))
+    git(peer, 'add', '.'); git(peer, 'commit', '-m', 'seed')
+    git(peer, 'push', '-u', 'origin', 'main')
+
+    // Ticket worktree clones/checks out at seed.
+    const worktree = scratch()
+    git(worktree, 'clone', remote, '.')
+    git(worktree, 'checkout', '-b', 'agent/tooling-fix')
+    const snapshot = captureWorkflow(worktree, worktree)!
+    const ticket = {
+      title: 'tooling fix',
+      mandate: { scope: 'small' },
+      execution: { directory: worktree, assignment: '', workflow: snapshot },
+    } as Ticket
+
+    // Meanwhile another teammate pushes a C++ game change to origin/main.
+    mkdirSync(path.join(peer, 'Source'))
+    writeFileSync(path.join(peer, 'Source/Other.cpp'), 'int other = 1;')
+    git(peer, 'add', 'Source'); git(peer, 'commit', '-m', 'unrelated upstream cpp')
+    git(peer, 'push', 'origin', 'main')
+
+    // Worker edits only tooling, rebases onto origin/main, and pushes HEAD:main.
+    writeFileSync(path.join(worktree, 'tools/a.ts'), 'worker tooling edit')
+    git(worktree, 'add', 'tools/a.ts'); git(worktree, 'commit', '-m', 'tooling edit')
+    git(worktree, 'fetch', 'origin')
+    git(worktree, 'rebase', 'origin/main')
+    git(worktree, 'push', 'origin', 'HEAD:main')
+    git(worktree, 'fetch', 'origin')
+
+    // Upstream Source/Other.cpp must NOT trigger Workflow CQTest on this tooling ticket.
+    expect(workflowReason(ticket)).toBeUndefined()
+
+    // Even when a worker did NOT push to origin/main yet (only rebased onto origin/main), upstream Source/Other.cpp must NOT trigger CQTest.
+    const unpushed = scratch()
+    git(unpushed, 'clone', remote, '.')
+    git(unpushed, 'checkout', '-b', 'agent/unpushed-tooling', 'HEAD~2')
+    const snapshotUnpushed = captureWorkflow(unpushed, unpushed)!
+    const ticketUnpushed = {
+      title: 'unpushed tooling',
+      mandate: { scope: 'small' },
+      execution: { directory: unpushed, assignment: '', workflow: snapshotUnpushed },
+    } as Ticket
+    writeFileSync(path.join(unpushed, 'tools/b.ts'), 'worker tooling edit 2')
+    git(unpushed, 'add', 'tools/b.ts'); git(unpushed, 'commit', '-m', 'tooling edit 2')
+    git(unpushed, 'fetch', 'origin')
+    git(unpushed, 'rebase', 'origin/main')
+    expect(workflowReason(ticketUnpushed)).toBeUndefined()
+
+    // Still triggers CQTest if the worker itself modifies Source/*.cpp after rebase.
+    mkdirSync(path.join(unpushed, 'Source'), { recursive: true })
+    writeFileSync(path.join(unpushed, 'Source/Mine.cpp'), 'int mine = 1;')
+    git(unpushed, 'add', 'Source/Mine.cpp'); git(unpushed, 'commit', '-m', 'my cpp edit')
+    expect(workflowReason(ticketUnpushed)).toContain('Workflow CQTest (Source/Mine.cpp)')
+  })
   it('has no extra contract without a policy and rejects malformed/path-escaping policies', () => {
     expect(captureWorkflow(scratch(), scratch())).toBeUndefined()
     expect(WorkflowPolicySchema.safeParse({ version: 1, repositories: ['../other'], rules: [] }).success).toBe(false)
