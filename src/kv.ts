@@ -29,9 +29,11 @@ export const KV = {
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
-  /** Runtime: the main Session's ID. */
+  /** Runtime: the main Session's ID, ticket analysis records, and Eval timeout recovery/notice state. */
   runtime: { masterId: record<string>('master-id'),
-    ticketAnalysis: family<{ input: import('./app/ticket-analysis.ts').TicketAnalysisInput; result: import('./app/ticket-analysis.ts').TicketAnalysisResult; finishedAt: string }, [ticket: string]>('ticket-analysis:') },
+    ticketAnalysis: family<{ input: import('./app/ticket-analysis.ts').TicketAnalysisInput; result: import('./app/ticket-analysis.ts').TicketAnalysisResult; finishedAt: string }, [ticket: string]>('ticket-analysis:'),
+    evalTimeoutRecovery: family<{ attempts: number; lastAt: string }, [trigger: string]>('eval-timeout-recovery:'),
+    evalTimeoutNotice: family<string, [thread: string]>('eval-timeout-notice:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */

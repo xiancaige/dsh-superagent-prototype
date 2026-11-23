@@ -35,6 +35,7 @@ import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary } from './notices.ts'
+import { hasPendingMasterWork, notifyEvalTimeout, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Mirror } from './mirror.ts'
@@ -296,7 +297,13 @@ export class Runtime extends Service implements SourceHost {
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
-        closing: () => this.closing(), paused: () => this.paused(), environment,
+        closing: () => this.closing(), paused: () => this.paused(),
+        hasPendingMasterWork: () => hasPendingMasterWork(store),
+        onMasterTurnCompleted: () => {
+          if (this.closing() || this.paused() || !setup.configured()) return
+          recoverTimedOutEvals({ store, engine: this.engine, requestPass: () => this.passes.request() })
+        },
+        environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
@@ -375,6 +382,13 @@ export class Runtime extends Service implements SourceHost {
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+          }
+          if (event.type === 'decision.recorded' && event.data.kind === 'unavailable') {
+            const decision = store.decisions.get(event.data.decisionId)
+            if (decision?.reason.some(item => item.code === 'timeout')) {
+              if (setup.configured()) notifyEvalTimeout({ store, outbox, decision })
+              queueMicrotask(() => { if (!this.closing()) sessions.kickMasterRecovery() })
+            }
           }
           // Persist the direct call in the same transaction as the end. Effects dispatch after commit,
           // survive restart, and never ask a broadcast listener or an LLM to notice the end.

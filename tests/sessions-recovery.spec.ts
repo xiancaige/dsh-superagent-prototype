@@ -17,7 +17,7 @@ describe('Sessions master error-turn inbox recovery', () => {
     vi.restoreAllMocks()
   })
 
-  function setup(opts: { paused?: boolean; initialEvents?: SessionEvent[] } = {}) {
+  function setup(opts: { paused?: boolean; initialEvents?: SessionEvent[]; hasPendingMasterWork?: () => boolean; onMasterTurnCompleted?: () => void } = {}) {
     const ctx = new Context()
     contexts.push(ctx)
     const masterId = 'orchestrator-test'
@@ -115,6 +115,8 @@ describe('Sessions master error-turn inbox recovery', () => {
       lifetime: new AbortController().signal,
       closing: () => false,
       paused: () => paused,
+      ...(opts.hasPendingMasterWork ? { hasPendingMasterWork: opts.hasPendingMasterWork } : {}),
+      ...(opts.onMasterTurnCompleted ? { onMasterTurnCompleted: opts.onMasterTurnCompleted } : {}),
       environment: () => [],
       tools: () => [],
     })
@@ -126,6 +128,21 @@ describe('Sessions master error-turn inbox recovery', () => {
       inbox,
       sessions,
       setPaused: (v: boolean) => { paused = v },
+      emitTurnStart: (turn = 1) => {
+        const ev = { type: 'turn/start', seq: SessionSeq(events.length + 1), time: Date.now(), data: { turn } } as unknown as SessionEvent
+        events.push(ev)
+        ctx.emit('session/event', session as never, ev)
+        for (const msg of [...inbox.nextStep.splice(0), ...inbox.nextTurn.splice(0)]) {
+          const userEv = { type: 'user/message', seq: SessionSeq(events.length + 1), time: Date.now(), data: msg } as unknown as SessionEvent
+          events.push(userEv)
+          ctx.emit('session/event', session as never, userEv)
+        }
+      },
+      emitUserMessage: (message: UserMessage) => {
+        const ev = { type: 'user/message', seq: SessionSeq(events.length + 1), time: Date.now(), data: message } as unknown as SessionEvent
+        events.push(ev)
+        ctx.emit('session/event', session as never, ev)
+      },
       emitTurnEnd: (kind: 'completed' | 'error') => {
         const ev = {
           type: 'turn/end',
@@ -216,6 +233,89 @@ describe('Sessions master error-turn inbox recovery', () => {
     await vi.advanceTimersByTimeAsync(30_000)
     expect(s.agent.steer).toHaveBeenCalledOnce()
     expect(s.agent.status).toBe('running')
+
+    s.sessions.dispose()
+  })
+
+  it('wakes masterId with recovery_wake when inbox is empty after an error turn if pending master work exists', async () => {
+    vi.useFakeTimers()
+    let pendingWork = true
+    const onMasterTurnCompleted = vi.fn()
+    const s = setup({ hasPendingMasterWork: () => pendingWork, onMasterTurnCompleted })
+    await s.sessions.ensure(s.session.id, 'D:/TP', 'master', 'orchestrator')
+
+    // Candidate was spliced out of inbox at turn/start, then the turn crashed with PI_AI_ERROR leaving inbox empty.
+    s.agent.status = 'running'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'running' })
+    s.emitTurnStart(1)
+    s.emitTurnEnd('error')
+    s.agent.status = 'idle'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'idle' })
+
+    expect(s.inbox.nextStep).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(s.agent.steer).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(s.agent.steer).toHaveBeenCalledOnce()
+    const wakeMsg = s.agent.steer.mock.calls[0]![0] as UserMessage
+    expect(wakeMsg.id).toMatch(/^dsh-superagent:recovery-wake:/)
+    expect(wakeMsg.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('"kind":"recovery_wake"') })
+
+    // Second error turn backs off to 10s when inbox is empty.
+    s.emitTurnStart(2)
+    s.emitTurnEnd('error')
+    s.agent.status = 'idle'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'idle' })
+    await vi.advanceTimersByTimeAsync(9999)
+    expect(s.agent.steer).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(s.agent.steer).toHaveBeenCalledTimes(2)
+
+    // Completing a turn notifies onMasterTurnCompleted and stops waking even if pendingWork flips false.
+    pendingWork = false
+    s.emitTurnStart(3)
+    s.emitTurnEnd('completed')
+    s.agent.status = 'idle'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'idle' })
+    await Promise.resolve()
+    expect(onMasterTurnCompleted).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(s.agent.steer).toHaveBeenCalledTimes(2)
+
+    s.sessions.dispose()
+  })
+
+  it('wakes masterId when a relay was consumed into a crashed turn even without other pending evals, and stays idle when nothing was pending', async () => {
+    vi.useFakeTimers()
+    const relayMsg = freezeMessage({
+      id: MessageId('dsh-superagent:report-1'),
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: '{"kind":"worker_report"}' }],
+      source: { kind: 'dsh-superagent' as const, form: 'relay' as const },
+    })
+    const initialEvents = [
+      { type: 'turn/start', seq: SessionSeq(1), time: Date.now(), data: { turn: 10 } },
+      { type: 'user/message', seq: SessionSeq(2), time: Date.now(), data: relayMsg },
+      { type: 'turn/end', seq: SessionSeq(3), time: Date.now(), data: { turn: 10, reason: { kind: 'error', error: { message: 'socket closed', code: 'TRANSPORT' } } } },
+    ] as unknown as SessionEvent[]
+    const s = setup({ initialEvents, hasPendingMasterWork: () => false })
+    await s.sessions.ensure(s.session.id, 'D:/TP', 'master', 'orchestrator')
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(s.agent.steer).toHaveBeenCalledOnce()
+
+    // Once completed, a subsequent empty error turn with no relay and no pending work does not trigger a wake.
+    s.emitTurnStart(11)
+    s.emitTurnEnd('completed')
+    s.agent.status = 'idle'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'idle' })
+
+    s.emitTurnStart(12)
+    s.emitTurnEnd('error')
+    s.agent.status = 'idle'
+    s.ctx.emit('agent/status', { agent: s.agent as never, status: 'idle' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(s.agent.steer).toHaveBeenCalledOnce()
 
     s.sessions.dispose()
   })

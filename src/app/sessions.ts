@@ -1,9 +1,9 @@
 /** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import { createUserMessage, freezeMessage, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
-import type { SessionId } from '@deepseek-ai/dsh-session'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import { dirname } from 'node:path'
 import { z } from 'zod'
@@ -35,6 +35,10 @@ export interface SessionsHost {
   readonly lifetime: AbortSignal
   closing(): boolean
   paused?(): boolean
+  /** Whether the main Session still has active/pending evaluations or recoverable timed-out evaluations. */
+  hasPendingMasterWork?(): boolean
+  /** Called after the main Session finishes a turn cleanly (`reason.kind === 'completed'`). */
+  onMasterTurnCompleted?(): void
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
@@ -91,6 +95,17 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
   return undefined
 }
 
+const RECOVERY_WAKE_PREFIX = 'dsh-superagent:recovery-wake:'
+const MAX_EMPTY_WAKE_ATTEMPTS = 24
+
+function isNonRecoveryRelay(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  if (String(event.data.id ?? '').startsWith(RECOVERY_WAKE_PREFIX)) return false
+  const source = event.data.source as { kind?: unknown; plugin?: unknown; form?: unknown }
+  return (source.kind === 'dsh-superagent' && source.form !== 'notice')
+    || (source.kind === 'plugin' && source.plugin === 'dsh-superagent')
+}
+
 function supervisorReports(messages: readonly UserMessage[]): { inject: boolean; ticketIds: string[] } {
   let inject = false
   const ticketIds: string[] = []
@@ -126,7 +141,10 @@ export class Sessions {
   private readonly ctx: Context
   private masterWakeTimer?: ReturnType<typeof setTimeout>
   private masterWakeAttempts = 0
+  private masterEmptyWakeAttempts = 0
   private masterLastEndError = false
+  private masterTurnHasRelay = false
+  private masterUncompletedRelay = false
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -149,12 +167,29 @@ export class Sessions {
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
-      if (agent.id === this.host.masterId && event.type === 'turn/end') {
-        if (event.data.reason.kind === 'error') {
-          this.masterLastEndError = true
-        } else {
-          this.masterLastEndError = false
-          this.masterWakeAttempts = 0
+      if (agent.id === this.host.masterId) {
+        if (event.type === 'turn/start') {
+          this.masterTurnHasRelay = false
+        } else if (isNonRecoveryRelay(event)) {
+          this.masterTurnHasRelay = true
+        } else if (event.type === 'turn/end') {
+          if (event.data.reason.kind === 'error') {
+            this.masterLastEndError = true
+            if (this.masterTurnHasRelay) this.masterUncompletedRelay = true
+          } else {
+            this.masterLastEndError = false
+            this.masterWakeAttempts = 0
+            this.masterEmptyWakeAttempts = 0
+            this.masterUncompletedRelay = false
+            if (event.data.reason.kind === 'completed') {
+              queueMicrotask(() => {
+                if (this.host.closing()) return
+                try { this.host.onMasterTurnCompleted?.() } catch (error) {
+                  this.ctx.logger.warn('dsh-superagent onMasterTurnCompleted failed: %s', String(error))
+                }
+              })
+            }
+          }
         }
       }
     })
@@ -184,23 +219,51 @@ export class Sessions {
     clearTimeout(this.masterWakeTimer)
     this.masterWakeTimer = undefined
   }
+  /** Re-arms error-turn recovery when new pending/timed-out work arises while the main Session sits idle after an error. */
+  kickMasterRecovery(): void {
+    const agent = this.ctx.agents.get(this.host.masterId as SessionId)
+    if (!agent || agent.status !== 'idle' || !this.masterLastEndError || this.host.closing()) return
+    this.masterEmptyWakeAttempts = 0
+    this.scheduleMasterWake(agent)
+  }
   private scheduleMasterWake(agent: Agent, overrideDelayMs?: number): void {
     if (this.masterWakeTimer || this.host.closing()) return
     if (agent.status !== 'idle') return
-    if (!agent.inbox.nextStep.length && !agent.inbox.nextTurn.length) return
     if (typeof agent.inbox.remove !== 'function') return
-    const delayMs = overrideDelayMs ?? Math.min(60_000, 5_000 * 2 ** Math.min(this.masterWakeAttempts++, 4))
+    const hasInbox = agent.inbox.nextStep.length > 0 || agent.inbox.nextTurn.length > 0
+    const hasPendingWork = (this.host.hasPendingMasterWork?.() ?? false) || this.masterUncompletedRelay
+    if (!hasInbox && !hasPendingWork) return
+    if (!hasInbox && overrideDelayMs === undefined && this.masterEmptyWakeAttempts >= MAX_EMPTY_WAKE_ATTEMPTS) return
+    const delayMs = overrideDelayMs ?? (hasInbox
+      ? Math.min(60_000, 5_000 * 2 ** Math.min(this.masterWakeAttempts++, 4))
+      : Math.min(300_000, 5_000 * 2 ** Math.min(this.masterEmptyWakeAttempts, 6)))
     this.masterWakeTimer = setTimeout(() => {
       this.masterWakeTimer = undefined
       if (this.host.closing() || agent.status !== 'idle') return
       if (this.ctx.agents.get(agent.id) !== agent) return
       if (this.host.paused?.()) { this.scheduleMasterWake(agent, 30_000); return }
       const message = agent.inbox.nextStep[0] ?? agent.inbox.nextTurn[0]
-      if (!message) return
-      const isNextStep = agent.inbox.nextStep[0] === message
-      if (!agent.inbox.remove(message.id)) return
-      if (isNextStep) agent.steer(message)
-      else agent.followup(message)
+      if (message) {
+        const isNextStep = agent.inbox.nextStep[0] === message
+        if (!agent.inbox.remove(message.id)) return
+        if (isNextStep) agent.steer(message)
+        else agent.followup(message)
+        return
+      }
+      if (!((this.host.hasPendingMasterWork?.() ?? false) || this.masterUncompletedRelay)) return
+      if (this.masterEmptyWakeAttempts >= MAX_EMPTY_WAKE_ATTEMPTS) return
+      const attempt = ++this.masterEmptyWakeAttempts
+      const wakeId = messageId(`recovery-wake:${Date.now()}:${attempt}`)
+      agent.steer(freezeMessage({
+        id: wakeId,
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          kind: 'recovery_wake',
+          attempt,
+          reason: 'Previous orchestrator turn ended with an error before completing. Check active candidates, unacted follow-ups/worker reports, or timed-out evaluations via orchestrator_read and finish routing or responding.',
+        }) }],
+        source: { kind: 'dsh-superagent' as const, form: 'relay' as const },
+      }))
     }, delayMs)
     this.masterWakeTimer.unref?.()
   }
@@ -331,8 +394,17 @@ export class Sessions {
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
     if (master) {
-      const lastTurnEnd = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
+      const events = agent.session.snapshotEvents()
+      const lastTurnEnd = events.findLast(event => event.type === 'turn/end')
       this.masterLastEndError = lastTurnEnd?.type === 'turn/end' && lastTurnEnd.data.reason.kind === 'error'
+      if (this.masterLastEndError && lastTurnEnd) {
+        const endIndex = events.lastIndexOf(lastTurnEnd)
+        const startIndex = events.slice(0, endIndex).findLastIndex(event => event.type === 'turn/start')
+        const turnEvents = events.slice(Math.max(0, startIndex), endIndex)
+        this.masterUncompletedRelay = turnEvents.some(isNonRecoveryRelay)
+      } else {
+        this.masterUncompletedRelay = false
+      }
       if (this.masterLastEndError && agent.status === 'idle') this.scheduleMasterWake(agent)
     }
     // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.

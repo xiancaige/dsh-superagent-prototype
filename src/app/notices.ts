@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { canAdvanceTicket, followupOwners, key, latestReport, liveTicket, type DomainEvent, type OutboundMessage, type Ticket, type WorkerReport } from '../core/index.ts'
+import { canAdvanceTicket, followupOwners, key, latestReport, liveTicket, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { IM_WORDS, imSummary } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -170,4 +170,31 @@ export function environmentLockNotices(ticket: Ticket, request: string, reason: 
     id: key('env-lock', ticket.id, options.assignmentId ?? '', dedup, channel.source, JSON.stringify(channel.address)),
     channel, text, kind: 'notice', ticketId: ticket.id,
   }))
+}
+/**
+ * Builds idempotent IM notices when an explicit human request times out in Eval (`unavailable` with `timeout`),
+ * so Feishu/local operators are not left with silent drops during upstream model outages.
+ */
+export function evalTimeoutNotices(decision: Decision, triggers: readonly Trigger[]): OutboundMessage[] {
+  if (decision.kind !== 'unavailable' || decision.strength !== 'explicit') return []
+  if (!decision.reason.some(item => item.code === 'timeout')) return []
+  const seenChannels = new Set<string>()
+  const notices: OutboundMessage[] = []
+  for (const trigger of triggers) {
+    if (!trigger.human || !trigger.channel || trigger.channel.source === 'github') continue
+    const channelKey = `${trigger.channel.source}:${JSON.stringify(trigger.channel.address)}`
+    if (seenChannels.has(channelKey)) continue
+    seenChannels.add(channelKey)
+    const chinese = chineseRequest(trigger.text, '')
+    const raw = chinese
+      ? '当前主控评估超时（上游模型响应异常或排队过久），消息已保留，模型恢复后会自动重新评估处理。'
+      : 'Assessment timed out (upstream model error or queue delay). Your message is saved and will be retried automatically once the model recovers.'
+    notices.push({
+      id: key('eval-timeout', decision.id, trigger.channel.source, JSON.stringify(trigger.channel.address)),
+      channel: trigger.channel,
+      text: imSummary(raw, IM_WORDS - 5, '…'),
+      kind: 'notice',
+    })
+  }
+  return notices
 }
