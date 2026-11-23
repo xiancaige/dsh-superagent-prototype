@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
@@ -101,6 +101,25 @@ export class Runtime extends Service implements SourceHost {
   }
   diagnoseTicketAnalysisSource(input: { ticketId: string; sessionId: string }) {
     return diagnoseTicketAnalysisSource(this.store, input)
+  }
+  /** Read-only workspace and project-root verification for live superagent worker experience reuse. */
+  resolveWorkerExperienceContext(input: { sessionId: string; cwd?: string }):
+    | { ok: true; ticketId: string; projectRoot: string; workspaceRoot: string; workspaceRole?: string }
+    | { ok: false } {
+    const ticketId = ticketOfSession(input.sessionId)
+    if (!ticketId) return { ok: false }
+    const ticket = this.store.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket)) return { ok: false }
+    const workspaceRoot = ticket.execution?.directory
+    if (!workspaceRoot || !input.cwd) return { ok: false }
+    const same = process.platform === 'win32'
+      ? resolve(workspaceRoot).toLowerCase() === resolve(input.cwd).toLowerCase()
+      : resolve(workspaceRoot) === resolve(input.cwd)
+    if (!same) return { ok: false }
+    const deployment = this.setup.configured() ? this.setup.deployment : undefined
+    const projectRoot = deployment?.sourceRoot || (deployment?.environment?.projectFile ? dirname(deployment.environment.projectFile) : undefined)
+    if (!projectRoot) return { ok: false }
+    return { ok: true, ticketId, projectRoot, workspaceRoot, ...(ticket.workspaceRole ? { workspaceRole: ticket.workspaceRole } : {}) }
   }
   /** Loopback management only: one explicitly requested attempt, never a history sweep. */
   async extractTicketExperience(ticketId: string, requestId: string) {

@@ -155,3 +155,17 @@ it('waits for a settling worker turn and flushes session persistence before call
     expect(order).toEqual(['idle', 'flush', 'analyze'])
   } finally { await f.effects.drain(); f.store.close() }
 })
+
+it('verifies active worker workspace context and revokes once ended', async () => {
+  const h = await startRuntime()
+  try {
+    const { ticket, sessionId } = await h.acceptedTicket(feishu('exp-ctx', 'Fix regression'))
+    const ok = h.runtime.resolveWorkerExperienceContext({ sessionId, cwd: ticket.execution!.directory })
+    expect(ok).toMatchObject({ ok: true, ticketId: ticket.id, workspaceRoot: ticket.execution!.directory })
+    expect(h.runtime.resolveWorkerExperienceContext({ sessionId, cwd: '/wrong/dir' })).toEqual({ ok: false })
+    expect(h.runtime.resolveWorkerExperienceContext({ sessionId: 'someone-else', cwd: ticket.execution!.directory })).toEqual({ ok: false })
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
+    await h.runtime.idle()
+    expect(h.runtime.resolveWorkerExperienceContext({ sessionId, cwd: ticket.execution!.directory })).toEqual({ ok: false })
+  } finally { await h.stop() }
+})

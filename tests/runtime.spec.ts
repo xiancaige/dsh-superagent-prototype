@@ -1854,3 +1854,18 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
 })
+
+it('admits experience_read and experience_feedback into worker tool allowlist when registered', async () => {
+  const { sessionId } = await acceptedTicket()
+  await (controller.create as (options: { sessionId: string }) => Promise<void>)({ sessionId: 'child-exp' })
+  const child = agents.get('child-exp')! as unknown as {
+    ctx: { tools: { get(name: string): unknown; restrict(rule: { allow: string[] }): () => void } }
+    session: { header: { parentSession?: string } }
+  }
+  child.session.header = { parentSession: sessionId }
+  const seen: { allow?: string[] }[] = []
+  child.ctx.tools.get = (name: string) => (name === 'experience_read' || name === 'experience_feedback' || name === 'read') ? { name } : undefined
+  child.ctx.tools.restrict = (rule: { allow: string[] }) => { seen.push(rule); return () => {} }
+  await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
+  expect(seen.at(-1)?.allow).toEqual(['read', 'experience_read', 'experience_feedback'])
+})
