@@ -9,15 +9,14 @@ import { runningJobs } from '../executor/background.ts'
 import { workerSessionId } from '../executor/dsh.ts'
 import { IM_WORDS, imSummary } from '../infra/text.ts'
 import { KV } from '../kv.ts'
-import { feishuSettings } from '../sources/feishu.ts'
+import { DEFAULT_PROGRESS_INTERVAL_SECONDS, feishuSettings } from '../sources/feishu.ts'
 import { SOURCE as FEISHU_SOURCE } from '../sources/feishu-trigger.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Mirror } from './mirror.ts'
 import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
 
-/** Default interval (seconds) before and between periodic Feishu progress updates. */
-export const DEFAULT_PROGRESS_INTERVAL_SECONDS = 180
+export { DEFAULT_PROGRESS_INTERVAL_SECONDS }
 /** How often the host checks running tickets for due Feishu progress updates. */
 const SWEEP_EVERY_MS = 30_000
 

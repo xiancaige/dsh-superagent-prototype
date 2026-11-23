@@ -18,10 +18,12 @@ const MembersSchema = z.looseObject({
   users: z.array(z.looseObject({ member_id: z.string(), name: z.string() })),
   has_more: z.boolean(), truncations: z.array(z.unknown()).optional(),
 })
+/** Default interval (seconds) before and between periodic Feishu progress updates. */
+export const DEFAULT_PROGRESS_INTERVAL_SECONDS = 600
 const FeishuConfigSchema = FeishuBotSchema.extend({
   readPageSize: z.number().int().min(1).max(50).default(20),
   linkTimeoutMs: z.number().int().min(1).max(90000).default(5000),
-  progressIntervalSeconds: z.number().int().min(0).max(3600).default(180),
+  progressIntervalSeconds: z.number().int().min(0).max(3600).default(DEFAULT_PROGRESS_INTERVAL_SECONDS),
   chats: z.array(z.object({ chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), name: z.string().trim().max(60).optional(), listen: z.enum(['mentions', 'all']) }).strict())
     .refine(chats => new Set(chats.map(chat => chat.chatId)).size === chats.length, 'Duplicate chat IDs')
     .default([]),

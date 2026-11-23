@@ -1,6 +1,6 @@
 /** Periodic Feishu intermediate progress synchronization for long-running tickets. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { activeStretchStartMs, collectProgressSnapshot, formatProgressSyncMessage } from '../src/app/progress-sync.ts'
+import { activeStretchStartMs, collectProgressSnapshot, DEFAULT_PROGRESS_INTERVAL_SECONDS, formatProgressSyncMessage } from '../src/app/progress-sync.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, wordCount } from '../src/infra/text.ts'
@@ -36,6 +36,34 @@ function larkMessages(): string[] {
 }
 
 describe('Feishu periodic progress sync', () => {
+  it('defaults to 600s (10 minutes) when progressIntervalSeconds is omitted from Feishu config', async () => {
+    expect(DEFAULT_PROGRESS_INTERVAL_SECONDS).toBe(600)
+    h = await startRuntime()
+    const settings = h.runtime.store.settings()
+    const feishuSource = settings.sources.feishu!
+    const { progressIntervalSeconds: _omitted, ...configWithoutInterval } = feishuSource.config
+    h.runtime.store.saveSettings({
+      ...settings,
+      sources: { ...settings.sources, feishu: { ...feishuSource, config: configWithoutInterval } },
+    })
+    expect(feishuKind.schema.parse(configWithoutInterval).progressIntervalSeconds).toBe(600)
+
+    const { ticket } = await h.acceptedTicket(feishu('100', '@bot 验证默认10分钟进度同步间隔'))
+    const startedMs = Date.parse(h.runtime.store.tickets.get(ticket.id)!.assignments[0]!.startedAt!)
+    const lark = vi.mocked(Commands.prototype.lark)
+    lark.mockClear()
+
+    // Still silent at 9m 50s (< 600s).
+    await h.runtime.progressSync.tick(startedMs + 590_000)
+    await h.runtime.sendReplies()
+    expect(larkMessages()).toEqual([])
+
+    // Fires after 10m (600s).
+    await h.runtime.progressSync.tick(startedMs + 605_000)
+    await h.runtime.sendReplies()
+    expect(larkMessages()).toHaveLength(1)
+  })
+
   it('stays silent before interval, then periodically syncs worker progress, live jobs, and session activity to Feishu within IM_WORDS', async () => {
     h = await startRuntime()
     setFeishuInterval(h, 180)
