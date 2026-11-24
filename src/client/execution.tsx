@@ -17,6 +17,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const { t, call, navigate } = usePanel()
   const [limit, setLimit] = useState(20)
   const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit } }), [current, limit])
+  const { data: sourceLock, reload: reloadLock } = usePoll(() => call('GET source-lock'), [])
   const { paused, load: { maxWorkers } } = state
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
@@ -36,6 +37,24 @@ export function ExecutionStatus({ filter: current, state, reload }: {
         ? 'resumeProcessingConfirm' : 'pauseProcessingConfirm')}
         onConfirm={pause} />
     </div>
+    {sourceLock?.locked && <div className="dt-banner dt-danger">
+      <span className="dt-banner-label">{t('problemSourceLock', { file: sourceLock.file ?? '' })}</span>
+      <span className="dt-mono">{sourceLock.holder ? t('sourceLockOwner', {
+        op: sourceLock.holder.op ?? t('empty'),
+        pid: sourceLock.holder.pid !== undefined ? String(sourceLock.holder.pid) : t('empty'),
+        ticket: sourceLock.holder.ticket ? sourceLock.holder.ticket.slice(0, 8) : t('empty'),
+        at: sourceLock.holder.at ?? t('empty'),
+      }) : sourceLock.raw}</span>
+      <Hint>{t(sourceLock.pidAlive === false ? 'sourceLockDeadHint' : 'sourceLockLiveHint')}</Hint>
+      <div className="dt-banner-actions">
+        <ConfirmButton variant="outline" icon="unlock" label={t('forceUnlock')} title={t('forceUnlockTitle')}
+          message={t('forceUnlockConfirm')}
+          onConfirm={async () => {
+            await call('POST source-lock/unlock', { body: { force: true, retryBlocked: true } })
+            await Promise.all([reloadLock(), reloadTickets(), reload()])
+          }} />
+      </div>
+    </div>}
     <div className="dt-filters">
       {TICKET_FILTERS.map(value => <Pill key={value} active={current === value}
         onClick={() => { setLimit(20); navigate({ page: 'execution', query: value === 'open' ? {} : { filter: value } },

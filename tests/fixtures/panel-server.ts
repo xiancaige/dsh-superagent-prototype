@@ -108,6 +108,7 @@ export interface PanelServer {
   opened: string[]
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
+  sourceLock: ApiResponse<'GET source-lock'>
 }
 export let server: PanelServer
 
@@ -183,6 +184,8 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const setup = problem ?? feishuProblem
   return {
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
+      ...(server.sourceLock.locked && (server.sourceLock.pidAlive === false || server.sourceLock.stale)
+        ? [{ kind: 'source-lock' as const, sourceLock: server.sourceLock }] : []),
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
         title: { zh: '飞书', en: 'Feishu' },
@@ -250,6 +253,7 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    sourceLock: { available: true, sourceRoot: '/srv/tp', file: '/srv/tp/.git/tp-source-operation.lock', locked: false },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -360,6 +364,14 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'PUT tickets/:id/delivery': { body: true, answer: () => refuse(400, 'No simulation target configured in this panel fixture') },
   'POST tickets/:id/delivery': { body: true, answer: () => ({ refused: true as const, reasons: ['No operator grant/target configured'] }) },
   'GET environment': { answer: () => ({ held: false }) },
+  'GET source-lock': { answer: () => server.sourceLock },
+  'POST source-lock/unlock': { body: true, answer: ({ body }) => {
+    const previous = server.sourceLock
+    if (!previous.locked) return { unlocked: false, existed: false, forced: false, stale: false, file: previous.file ?? '', sourceRoot: previous.sourceRoot ?? '', retriedTickets: [] }
+    if (previous.pidAlive !== false && !body.force) return refuse(400, 'Source checkout lock is held by live PID; confirm force unlock to override', { code: 'notRetryable', values: {} })
+    server.sourceLock = { ...previous, locked: false, holder: undefined, raw: undefined, pidAlive: undefined, reapable: false, stale: false }
+    return { unlocked: true, existed: true, forced: previous.pidAlive !== false, stale: previous.pidAlive === false, file: previous.file ?? '', sourceRoot: previous.sourceRoot ?? '', ...(previous.holder ? { holder: previous.holder } : {}), retriedTickets: body.retryBlocked ? ['t4'] : [] }
+  } },
   'POST tickets/:id/environment/handover': { body: true, answer: ({ params }) => {
     if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
     return { handedOver: false, files: 0, error: 'this panel fixture holds no TP environment' }

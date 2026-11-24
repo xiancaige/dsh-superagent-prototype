@@ -296,3 +296,26 @@ it('shows recorded orchestrator decisions and their rationale on the ticket page
   await click(zh.deliveredInputs.replace('{count}', '2'))
   expect(text()).toContain(zh['input.orchestrator-decision'])
 })
+
+it('shows an active source checkout lock on Execution and lets the operator force-unlock it', async () => {
+  server.sourceLock = {
+    available: true,
+    sourceRoot: '/srv/tp',
+    file: '/srv/tp/.git/tp-source-operation.lock',
+    locked: true,
+    pidAlive: true,
+    reapable: false,
+    stale: false,
+    holder: { pid: 4321, op: 'package', ticket: 't1', at: '2026-11-24T09:00:00Z' },
+  }
+  at({ page: 'execution' })
+  await mount()
+  expect(text()).toContain('源工程被锁')
+  await click(zh.forceUnlock)
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.path === 'source-lock/unlock')).toMatchObject({
+    method: 'POST',
+    body: { force: true, retryBlocked: true },
+  })
+  expect(text()).not.toContain('源工程被锁')
+})

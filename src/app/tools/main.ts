@@ -12,6 +12,7 @@ import { readResource, type MainResourceHost, type ResourceHost } from '../resou
 import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
+import type { ForceUnlockResponse, SourceLockStatus } from '../source-lock.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 const RoutingNoteSchema = z.string().trim()
@@ -31,6 +32,10 @@ export interface MainToolsHost {
   sendReplies(): Promise<void>
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
+  /** Inspects the shared source checkout lock (`tp-source-operation.lock`). */
+  sourceLock?(): SourceLockStatus
+  /** Unlocks a stale or operator-authorized source checkout lock and optionally retries lock-blocked tickets. */
+  unlockSourceLock?(input: { force?: boolean; retryBlocked?: boolean }): ForceUnlockResponse
 }
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
 function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: string; ticketId?: string | undefined }) {
@@ -343,6 +348,25 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         if (args.baseRevision === undefined) throw new Error('Saving needs baseRevision, the revision the configuration edits')
         const { context_delivery: _delivery, ...saved } = await savePrompts(host, args.config, args.baseRevision, 'tool')
         return saved
+      },
+    }),
+    tool({
+      name: 'orchestrator_source_lock',
+      description: 'Inspect or unlock the shared source checkout lock (tp-source-operation.lock). Dead-PID locks can be cleared without force; live or unknown owners require force=true and an explicit human request to force unlock. Optionally retries open tickets blocked by the lock.',
+      schema: z.object({
+        action: z.enum(['status', 'unlock']),
+        force: z.boolean().optional().describe('With unlock: override even if the recorded PID appears alive or unknown; use only on an explicit human request.'),
+        retry_blocked: z.boolean().optional().default(true).describe('With unlock: retry open tickets whose latest failure was caused by source checkout lock contention.'),
+      }).strict(),
+      execute: async args => {
+        if (args.action === 'status') {
+          if (!host.sourceLock) throw new Error('Source lock inspection is unavailable')
+          return host.sourceLock()
+        }
+        if (!host.unlockSourceLock) throw new Error('Source lock recovery is unavailable')
+        const result = host.unlockSourceLock({ ...(args.force !== undefined ? { force: args.force } : {}), retryBlocked: args.retry_blocked })
+        host.requestPass()
+        return result
       },
     }),
   ]

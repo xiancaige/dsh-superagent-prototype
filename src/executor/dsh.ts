@@ -352,7 +352,7 @@ export class DshExecutor implements Executor {
           process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
           dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
       } finally { this.finalizing.delete(ticketId) }
-    }, { limit: () => host.paused() ? 0 : 1, retry: [5000, 300_000] })
+    }, { limit: () => host.paused() ? 0 : 1, retry: [5000, 3_600_000] })
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text), and the worker the decision named. */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {

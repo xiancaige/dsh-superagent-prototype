@@ -56,6 +56,21 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
     case 'outgoing': return row(t('problemReply', { source: valueLabel(t, 'source', problem.outgoing.channel.source),
       attempts: problem.outgoing.attempts }),
       raw(problem.outgoing.error), undefined)
+    case 'source-lock': {
+      const lock = problem.sourceLock
+      const holder = lock.holder
+      const owner = holder ? t('sourceLockOwner', {
+        op: holder.op ?? t('empty'),
+        pid: holder.pid !== undefined ? String(holder.pid) : t('empty'),
+        ticket: holder.ticket ? holder.ticket.slice(0, 8) : t('empty'),
+        at: holder.at ?? t('empty'),
+      }) : lock.raw
+      return row(t('problemSourceLock', { file: lock.file ?? '' }), raw(owner), { page: 'execution' },
+        t(lock.pidAlive === false ? 'sourceLockDeadHint' : 'sourceLockLiveHint'),
+        <ConfirmButton variant="outline" icon="unlock" label={t('forceUnlock')} title={t('forceUnlockTitle')}
+          message={t('forceUnlockConfirm')}
+          onConfirm={async () => { await call('POST source-lock/unlock', { body: { force: true, retryBlocked: true } }); await onChanged() }} />)
+    }
   }
 }
 

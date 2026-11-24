@@ -4,6 +4,7 @@ import type { Health } from '../../sources/host.ts'
 import type { SetupProblem } from '../../setup.ts'
 import { anyoneAllowed } from '../../policy.ts'
 import type { Store } from '../store.ts'
+import type { SourceLockStatus } from '../source-lock.ts'
 import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
 import { sourceHealth, type HealthMap } from './sources.ts'
 import { ticketRow, type ExecutorLoad } from './tickets.ts'
@@ -35,7 +36,8 @@ export function evalsHealth(store: Store, now = Date.now()): Health {
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.
  * @param setup - Setup problem to surface first (where setup stopped, or a Source paused by setup).
  */
-export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem) {
+export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem,
+  sourceLock?: SourceLockStatus) {
   const { store, sources } = host
   const view = snapshot(host)
   const settings = store.settings()
@@ -47,6 +49,8 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const sourceParts = new Set(instances.flatMap(instance => sources.kind(instance.kind)?.health ?? []))
   const problems = [
     ...(setup ? [{ kind: 'setup' as const, ...setup }] : []),
+    ...(sourceLock?.locked && (sourceLock.pidAlive === false || sourceLock.stale)
+      ? [{ kind: 'source-lock' as const, sourceLock }] : []),
     ...(running.length ? [] : [{ kind: 'no-source' as const }]),
     // Only allowed senders can originate work, so empty allowlists mean no request can ever become a ticket.
     ...(anyoneAllowed(settings) ? [] : [{ kind: 'no-allowed' as const }]),

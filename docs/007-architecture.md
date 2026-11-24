@@ -403,7 +403,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/sources/feishu-model-card.ts` | The Feishu card and bot-menu projections of the TP `/model` command, answered within the CLI's three-second callback window |
-| `src/app/feishu-commands.ts` | The TP operator commands of the Feishu Source (`/model`, `/todo`, `/help`): who may run one, and the receipt that keeps a replayed command from running twice |
+| `src/app/feishu-commands.ts` | The TP operator commands of the Feishu Source (`/model`, `/todo`, `/unlock`, `/help`): who may run one, and the receipt that keeps a replayed command from running twice |
+| `src/app/source-lock.ts` | Inspection, dead-PID stale-lock reaping, force-unlock, and blocked-ticket recovery for `tp-source-operation.lock` |
 | `src/app/ticket-analysis.ts` | The ticket-analysis effect the orchestrator calls directly when a ticket ends, so reflection never waits on a broadcast listener |
 | `src/sources/wecom.ts` | The WeCom kind and plugin entry, exported as `./wecom-watch`: the chats, the Policy, the Channel and the long connection |
 | `src/sources/wecom-trigger.ts` | WeCom callbacks as Triggers, and the chat, topic and reply addresses they use |
@@ -506,6 +507,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/route.spec.ts` | The panel's typed routes: parsing, the settings group opened last, and the pages each route names |
 | `tests/feishu-commands.spec.ts` | The TP Feishu operator commands: admission, the model selection they apply, and the receipts that deduplicate a replayed callback |
+| `tests/source-lock.spec.ts` | Source checkout lock inspection, dead-PID reaping, force-unlock safety, blocked-ticket retry, HTTP routes, main-Session tool, and Feishu `/unlock` command |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/environment-config.spec.ts` | The rollout's `environment` section: absent or disabled stays `recoveryEnabled: false` (no environment, `held:false`, `noEnvironment`), an enabled section reaches the plugin config through a valid YAML block, and a wrong path, port or key fails loudly in `setup-superagent.mjs` instead of disabling silently |

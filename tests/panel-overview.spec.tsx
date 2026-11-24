@@ -157,3 +157,25 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
 })
+
+it('shows a stale source checkout lock problem and force-unlocks it after confirmation', async () => {
+  server.sourceLock = {
+    available: true,
+    sourceRoot: '/srv/tp',
+    file: '/srv/tp/.git/tp-source-operation.lock',
+    locked: true,
+    pidAlive: false,
+    reapable: true,
+    stale: true,
+    holder: { pid: 9116, op: 'finalize', ticket: 'd01b579d340ed0090e3f56eef5806f85', at: '2026-11-24T05:34:41.695Z' },
+  }
+  await mount()
+  expect(text()).toContain('源工程被锁')
+  await click(find(zh.forceUnlock, '.dt-att button'))
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.path === 'source-lock/unlock')).toMatchObject({
+    method: 'POST',
+    body: { force: true, retryBlocked: true },
+  })
+  expect(text()).not.toContain('源工程被锁')
+})

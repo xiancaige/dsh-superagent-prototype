@@ -33,6 +33,7 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import type { EnvironmentExclusivityView } from './environment-exclusive.ts'
+import type { ForceUnlockResponse, SourceLockStatus } from './source-lock.ts'
 import { retryFinalize, type FinalizeRetryHost } from './finalize-retry.ts'
 
 export interface HttpHost extends FinalizeRetryHost {
@@ -66,6 +67,10 @@ export interface HttpHost extends FinalizeRetryHost {
   extractTicketExperience(ticketId: string, requestId: string): Promise<import('./ticket-analysis.ts').TicketAnalysisResult>
   /** Phase 2 C: the shared TP environment's holder, heartbeat and latest release, as a person sees it. */
   environment(): EnvironmentExclusivityView
+  /** Shared source checkout lock status (`tp-source-operation.lock`). */
+  sourceLock?(): SourceLockStatus
+  /** Force-unlock the shared source checkout lock and optionally retry tickets blocked by it. */
+  unlockSourceLock?(input: { force?: boolean; retryBlocked?: boolean }): ForceUnlockResponse
 }
 /**
  * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
@@ -180,7 +185,7 @@ function routes(runtime: HttpHost): Routes {
     },
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem, runtime.sourceLock?.()),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.mounted.stateDir, runtime.mounted),
@@ -267,6 +272,15 @@ function routes(runtime: HttpHost): Routes {
       return runtime.engine.deliverTicket(ticket(params.id), input.assignmentId, input.level, input.requestId)
     },
     'GET environment': () => runtime.environment(),
+    'GET source-lock': () => runtime.sourceLock ? runtime.sourceLock() : { available: false, locked: false },
+    'POST source-lock/unlock': async ({ body }) => {
+      if (!runtime.unlockSourceLock) throw new RouteError(404, 'Source lock management is unavailable')
+      const raw = await body()
+      const input = z.object({ force: z.boolean().optional(), retryBlocked: z.boolean().optional() }).strict().parse(raw ?? {})
+      const result = runtime.unlockSourceLock(input)
+      runtime.requestPass()
+      return result
+    },
     'POST tickets/:id/environment/handover': async ({ params, body }) => {
       const id = ticket(params.id)
       // A person's handover is explicit; without a body the tab keeps the ticket running for rework.

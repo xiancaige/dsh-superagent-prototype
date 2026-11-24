@@ -55,6 +55,8 @@ import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 import { TpEditorRecovery, type RecoverySettings, type TpEditorEnvironment } from './editor-recovery.ts'
 import { EnvironmentExclusivity, type EnvironmentExclusivityView } from './environment-exclusive.ts'
+import { forceUnlockSourceLock, inspectSourceLock, reapStaleSourceLock, resolveSourceRoot, retrySourceLockBlockedTickets,
+  type ForceUnlockResponse, type SourceLockStatus } from './source-lock.ts'
 import { TicketedEnvironment, environmentPort } from './ticketed-environment.ts'
 import { unpublishedReason } from './publication.ts'
 import { observeWorkflow, workflowReason } from './workflow-validation.ts'
@@ -440,7 +442,10 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       const feishuCommands = new FeishuCommands({ context: ctx, store, settings: this.settings, sessions, outbox, sources,
         masterId, sendModelCard: (target, card) => sendModelCard(commands, target, card),
-        ...(machine.sourceRoot ? { root: machine.sourceRoot } : {}) })
+        sourceLock: () => runtime.sourceLockStatus(),
+        unlockSourceLock: input => runtime.unlockSourceLock(input),
+        ...((machine.sourceRoot || (machine.environment?.projectFile ? dirname(machine.environment.projectFile) : undefined))
+          ? { root: machine.sourceRoot || dirname(machine.environment!.projectFile!) } : {}) })
       this.sourceDeps = { store, engine, outbox, commands, sources, cardAction: input => feishuCommands.cardAction(input), menuAction: input => feishuCommands.menuAction(input),
         command: trigger => feishuCommands.receive(trigger), get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
@@ -457,6 +462,8 @@ export class Runtime extends Service implements SourceHost {
           for (const message of messages) outbox.send(message)
           return messages.length > 0
         },
+        sourceLock: () => runtime.sourceLockStatus(),
+        unlockSourceLock: input => runtime.unlockSourceLock(input),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
@@ -509,6 +516,7 @@ export class Runtime extends Service implements SourceHost {
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
+    reapStaleSourceLock(this.sourceRoot(), this.ctx.logger)
     this.executor.resume()
     this.passes.start()
     this.effects.start()
@@ -578,6 +586,20 @@ export class Runtime extends Service implements SourceHost {
   environmentView(): EnvironmentExclusivityView {
     return this.environmentHosted?.broker.view() ?? { held: false }
   }
+  private sourceRoot(): string | undefined {
+    return resolveSourceRoot(this.mounted, this.setup.configured() ? this.setup.deployment : undefined)
+  }
+  /** Inspect the shared source checkout lock (`tp-source-operation.lock`) on the configured source repository. */
+  sourceLockStatus(): SourceLockStatus {
+    return inspectSourceLock(this.sourceRoot())
+  }
+  /** Clear a stale or operator-authorized source checkout lock and optionally retry tickets blocked by it. */
+  unlockSourceLock(input: { force?: boolean; retryBlocked?: boolean } = {}): ForceUnlockResponse {
+    const result = forceUnlockSourceLock(this.sourceRoot(), { ...(input.force !== undefined ? { force: input.force } : {}) })
+    const retriedTickets = input.retryBlocked ? retrySourceLockBlockedTickets(this.engine, this.store) : []
+    if (retriedTickets.length) this.passes.request()
+    return { ...result, retriedTickets }
+  }
   /** Stop exactly the TP editor this deployment started for a ticket, before its environment goes elsewhere. */
   private async stopTicketEditor(ticketId: string, environment: TpEditorEnvironment): Promise<void> {
     await this.editorRecovery?.cleanup(ticketId, environment)
@@ -593,7 +615,9 @@ export class Runtime extends Service implements SourceHost {
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog(),
-      environment: () => runtime.environmentView() }
+      environment: () => runtime.environmentView(),
+      sourceLock: () => runtime.sourceLockStatus(),
+      unlockSourceLock: input => runtime.unlockSourceLock(input) }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }

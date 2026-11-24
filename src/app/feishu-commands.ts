@@ -15,6 +15,7 @@ import { resolveRoleModel } from './role-models.ts'
 import { IM_WORDS, imSummary, wordCount } from '../infra/text.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import type { EnvironmentExclusivityView } from './environment-exclusive.ts'
+import type { ForceUnlockResponse, SourceLockStatus } from './source-lock.ts'
 import type { Store } from './store.ts'
 import type { Settings } from './settings.ts'
 import type { Sessions } from './sessions.ts'
@@ -183,7 +184,7 @@ export function buildTicketDetailCard(ticket: Ticket, request?: string): object 
 }
 
 const receipts = family<{ text: string }>('feishu-command:')
-const HELP = '工单：/tickets [筛选] [页] 列表；/ticket <ID> 状态；/stop <ID> [原因] 结束；/retry <ID> 重试；/ask <ID> 催报；/note <ID> <内容> 备注。控制：/status 总览；/pause|/resume 暂停恢复；/env 环境锁；/sync 名单；/todo [编号]；/model 模型。'
+const HELP = '工单：/tickets [筛选] [页] 列表；/ticket <ID> 状态；/stop <ID> [原因] 结束；/retry <ID> 重试；/ask <ID> 催报；/note <ID> <内容> 备注。控制：/status 总览；/pause|/resume 暂停恢复；/env 环境锁；/unlock [force] 解锁源工程；/sync 名单；/todo [编号]；/model 模型。'
 export interface FeishuCommandsHost {
   context: Context
   store: Store
@@ -198,6 +199,8 @@ export interface FeishuCommandsHost {
   engine?: Pick<EngineForPeople, 'stopTicket' | 'retryTicket' | 'handOverEnvironment' | 'releaseEndedEnvironment'>
     & Pick<EngineForMainSession, 'requestStatus' | 'note'>
   environment?(): EnvironmentExclusivityView
+  sourceLock?(): SourceLockStatus
+  unlockSourceLock?(input: { force?: boolean; retryBlocked?: boolean }): ForceUnlockResponse
 }
 
 /**
@@ -315,7 +318,7 @@ export class FeishuCommands {
     if (trigger.source !== 'feishu') return false
     // Feishu puts the bot mention before the command. Do not strip arbitrary quoted text.
     const text = trigger.text.trim().replace(trigger.addressed === 'mention' ? /^@\S+\s+/ : /$^/, '')
-    const match = /^(\/?todo|\/model|\/mode|\/tickets?|\/status|\/overview|\/stop|\/end|\/retry|\/ask|\/ping|\/note|\/pause|\/resume|\/env|\/sync|\/h|\/help)(?:\s+([\s\S]*))?$/i.exec(text)
+    const match = /^(\/?todo|\/model|\/mode|\/tickets?|\/status|\/overview|\/stop|\/end|\/retry|\/ask|\/ping|\/note|\/pause|\/resume|\/env|\/unlock|\/sync|\/h|\/help)(?:\s+([\s\S]*))?$/i.exec(text)
     if (!match) return false
     const { store, sources, outbox } = this.host
     // Thread subscriptions do NOT grant command privileges. Bots, unlisted people and unaddressed group messages cannot act.
@@ -387,6 +390,7 @@ export class FeishuCommands {
     if (command === '/pause') return this.pause(true)
     if (command === '/resume') return this.pause(false)
     if (command === '/env') return this.env(args)
+    if (command === '/unlock') return this.unlock(args)
     if (command === '/sync') return this.sync(args)
     return HELP
   }
@@ -488,10 +492,15 @@ export class FeishuCommands {
     }
     const env = this.host.environment?.()
     const envLine = env ? (env.held ? `环境锁：${env.holder?.label} (${env.holder?.id.slice(0, 8)})` : '环境锁：空闲') : undefined
+    const lock = this.host.sourceLock?.()
+    const lockLine = lock?.locked
+      ? `源工程锁：${lock.holder?.op ?? '未知'} PID ${lock.holder?.pid ?? '?'}${lock.pidAlive === false ? '（进程已结束）' : ''}，可用 /unlock force 解锁`
+      : undefined
     return [
       `Superagent：${settings.paused ? '已暂停' : '运行中'} | 槽位上限 ${settings.executor.maxWorkers}`,
       `工单：进行中 ${open.length}（执行 ${working}/排队 ${queued}/待人工 ${person}/空闲 ${idle}），已结束 ${all.length - open.length}`,
       ...envLine ? [envLine] : [],
+      ...lockLine ? [lockLine] : [],
       `列表：/tickets；暂停：${settings.paused ? '/resume' : '/pause'}`,
     ].join('\n')
   }
@@ -548,6 +557,26 @@ export class FeishuCommands {
     const result = await this.requireEngine().releaseEndedEnvironment(ticket.id)
     return result.released ? `已释放已结束工单 ${ticket.id.slice(0, 8)} 的环境锁。`
       : `环境锁释放失败：${result.error ?? '未知原因'}`
+  }
+  private unlock(args: string[]): string {
+    if (args.length > 1 || (args[0] && args[0] !== 'force' && args[0] !== '--force' && args[0] !== 'status')) {
+      return '用法：/unlock [force|status]'
+    }
+    if (args[0] === 'status') {
+      if (!this.host.sourceLock) return '当前部署未配置源工程锁检查。'
+      const status = this.host.sourceLock()
+      if (!status.available) return `源工程锁不可用：${status.error ?? '未配置源工程路径'}`
+      if (!status.locked) return '源工程锁当前空闲。'
+      return `源工程锁占用中：PID ${status.holder?.pid ?? '?'}（${status.pidAlive === false ? '已退出' : status.pidAlive ? '运行中' : '未知状态'}），操作 ${status.holder?.op ?? '未知'}，工单 ${status.holder?.ticket?.slice(0, 8) || '无'}，时间 ${status.holder?.at ?? '未知'}。发 /unlock force 强制解锁。`
+    }
+    if (!this.host.unlockSourceLock) return '当前部署未配置源工程解锁。'
+    const force = args[0] === 'force' || args[0] === '--force'
+    const result = this.host.unlockSourceLock({ force, retryBlocked: true })
+    if (!result.unlocked) return '源工程当前无锁，无需解锁。'
+    const retryNote = result.retriedTickets.length
+      ? `；已重试受阻工单 ${result.retriedTickets.map(id => id.slice(0, 8)).join('、')}`
+      : ''
+    return `已${result.forced ? '强制' : ''}解除源工程锁（原持有 PID ${result.holder?.pid ?? '?'}）${retryNote}。`
   }
   private async sync(args: string[]): Promise<string> {
     if (args.length > 1) return '用法：/sync [来源，默认 feishu]'
