@@ -10,4 +10,5 @@ Ticket: 5e285dc585652f1a5ecdc17fb49bb3f3. Scope: remove DSH picker entries for r
 ## Progress
 - Original Feishu thread and machine-local settings read; loaded plugin points at the source checkout, not this ticket directory.
 - Implementation and directed tests in progress. Next automatically: affected specs, typecheck/build, publication inside-out, deploy to loaded checkout, safe restart, inspect live registry and health.
+- Live verification completed after host restart: `storages/workspace.json` dropped from 127 registrations (110 missing ended-ticket paths) to 17 existing directories (0 missing), while retaining `D:\TP`, `D:\pointplan`, `D:\TP\.dsh\home\state\superagent`, all remaining ticket directories and all session logs.
 - No gameplay changes, game build, editor, CQTest or visual acceptance applies.
