@@ -517,6 +517,8 @@ export class Runtime extends Service implements SourceHost {
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     reapStaleSourceLock(this.sourceRoot(), this.ctx.logger)
+    await this.executor.reconcileWorkspaces()
+    if (this.closing()) return
     this.executor.resume()
     this.passes.start()
     this.effects.start()

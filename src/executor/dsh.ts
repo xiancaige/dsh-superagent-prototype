@@ -17,6 +17,7 @@ import { captureWorkflow } from '../app/workflow-validation.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
+import { unregisterMissingWorkspace } from './workspace-cleanup.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, hasBackgroundWork, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
@@ -351,8 +352,28 @@ export class DshExecutor implements Executor {
         await runAsWorker(host.context.subprocess,
           process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
           dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
+        // Keep this in the durable effect: failed registry writes retry after an idempotent finalizer.
+        await unregisterMissingWorkspace(host.context.workspaceRegistry, host.store.tickets, ticket,
+          host.analysisProjectRoot?.() ?? host.machine.sourceRoot)
       } finally { this.finalizing.delete(ticketId) }
     }, { limit: () => host.paused() ? 0 : 1, retry: [5000, 3_600_000] })
+  }
+  /** Backfill registrations left by older finalizers, without reclaiming any directory or touching live tickets. */
+  async reconcileWorkspaces(): Promise<void> {
+    const host = this.host
+    if (host.machine.workspaceMode === 'source' || !host.store.settings().executor.finalize.trim()) return
+    for (const ticket of host.store.tickets.list()) {
+      if (!ticket.ended || host.effects.pending?.('finalize', ticket.id)) continue
+      try {
+        const deleted = await unregisterMissingWorkspace(host.context.workspaceRegistry, host.store.tickets, ticket,
+          host.analysisProjectRoot?.() ?? host.machine.sourceRoot)
+        if (deleted) host.context.logger.info('Removed %s reclaimed workspace registration(s) for ticket %s', deleted, ticket.id)
+      } catch (error) {
+        // A cleanup failure must not take down the host. Preserve the registration and expose the actual error.
+        host.context.logger.warn('Workspace registration cleanup failed for ticket %s: %s', ticket.id, String(error))
+        host.health.set({ state: 'error', detail: `Workspace registration cleanup for ${ticket.id}: ${String(error)}`, at: now() })
+      }
+    }
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text), and the worker the decision named. */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {

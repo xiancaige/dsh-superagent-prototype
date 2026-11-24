@@ -90,6 +90,7 @@ it('releases a failed finalizer lease while retaining the durable retry', async 
   await h.runtime.idle()
   expect(h.runtime.executor.workspaceBusy(one.ticket.id)).toBe(false)
   expect(h.runtime.effects.pending('finalize', one.ticket.id)).toBe(true)
+  expect(h.workspaceRegistry.delete).not.toHaveBeenCalled()
   h.runtime.receive(feishu('failure-followup', `工单 ${one.ticket.id} 继续修复`, { root_id: 'om_lease-failure', mentions: [] }))
   await h.runtime.pump()
   expect(h.runtime.store.tickets.get(one.ticket.id)?.ended).toBeUndefined()

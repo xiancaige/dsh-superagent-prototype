@@ -292,6 +292,11 @@ export class Sessions {
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
+    if (role === 'worker') {
+      // A reclaimed ticket keeps its Session log. Recreate its registration and membership on resume.
+      const workspace = await ctx.workspaceRegistry.create(cwd)
+      await workspace.attachSession(id as SessionId)
+    }
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
