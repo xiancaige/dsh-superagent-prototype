@@ -188,11 +188,14 @@ export function leaseLive(record: EnvironmentLeaseRecord, deps: Pick<Exclusivity
   return (deps.alive ?? defaultAlive)(record.pid)
 }
 
+const projectDirectory = (projectFile: string): string =>
+  (/^[A-Za-z]:[\\/]/.test(projectFile) || projectFile.startsWith('\\\\') ? path.win32 : path).dirname(projectFile)
+
 /** The resources one TP environment lease covers; a ticket adds its own execution directory. */
 export const environmentResources = (environment: { projectFile: string; port: number }, directory?: string): EnvironmentLeaseRecord['resources'] => [
   { name: 'tp-editor', value: environment.projectFile },
   { name: 'tpmcp-port', value: String(environment.port) },
-  { name: 'tp-project', value: path.dirname(environment.projectFile) },
+  { name: 'tp-project', value: projectDirectory(environment.projectFile) },
   ...directory ? [{ name: 'ticket-directory' as const, value: directory }] : [],
 ]
 

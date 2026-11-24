@@ -17,7 +17,7 @@ import type { DeliveryAttempt, DeliveryLevel, DeliveryResult } from '../src/core
 import { ticketed } from './fixtures/environment.ts'
 import { CQTEST_PASSING_ID, writeCqtestReport } from './fixtures/cqtest-report.ts'
 
-const executable = execFileSync('python', ['-I', '-S', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
+const executable = realpathSync(process.execPath)
 const here = dirname(fileURLToPath(import.meta.url))
 const roots: string[] = []
 const stores = new Set<Store>()

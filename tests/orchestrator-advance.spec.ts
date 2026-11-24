@@ -1,5 +1,5 @@
 /** Tests for orchestrator decision delegation, ticket advancement, decision-process recording, safety gates, and resource reads. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -167,7 +167,7 @@ describe('Engine.advanceTicket', () => {
       .toThrow(new UserError('advanceAlreadyReady'))
 
     const { ticketId: designId } = h.accept('7')
-    const ws = mkdtempSync(join(tmpdir(), 'advance-design-'))
+    const ws = realpathSync(mkdtempSync(join(tmpdir(), 'advance-design-')))
     dirs.push(ws)
     mkdirSync(join(ws, 'plans'), { recursive: true })
     writeFileSync(join(ws, 'plans', 'd.md'), '# design\n')

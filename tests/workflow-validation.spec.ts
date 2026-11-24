@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -12,7 +12,7 @@ import { createValidationContract, runValidation } from '../src/validation.ts'
 
 vi.setConfig({ testTimeout: 90_000 })
 const roots: string[] = []
-const scratch = () => { const root = mkdtempSync(path.join(tmpdir(), 'dsh-workflow-')); roots.push(root); return root }
+const scratch = () => { const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'dsh-workflow-'))); roots.push(root); return root }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' })
 function repository() {

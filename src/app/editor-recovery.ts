@@ -200,7 +200,8 @@ export function tpmcpCaptureCall(input: {
   return { tool: DISPATCH_TOOL, arguments: { toolset_name: toolset, tool_name: bare, arguments: { ...input.template } } }
 }
 
-const comparable = (value: string) => process.platform === 'win32' ? value.toLowerCase() : value
+const isWindowsPath = (value: string) => /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')
+const comparable = (value: string, win = process.platform === 'win32') => win ? value.toLowerCase() : value
 const backslashes = (value: string) => value.replace(/\//g, '\\')
 
 /**
@@ -212,8 +213,10 @@ const backslashes = (value: string) => value.replace(/\//g, '\\')
 export function isTpEditorProcess(process: Pick<EditorProcess, 'name' | 'commandLine' | 'executablePath'>, projectFile: string): boolean {
   if (!/^unrealeditor/i.test(process.name)) return false
   if (!process.commandLine) return false
-  const commandLine = comparable(backslashes(process.commandLine))
-  const project = comparable(backslashes(path.resolve(projectFile)))
+  const win = isWindowsPath(projectFile)
+  const resolver = win ? path.win32 : path
+  const commandLine = comparable(backslashes(process.commandLine), win)
+  const project = comparable(backslashes(resolver.resolve(projectFile)), win)
   if (!project) return false
   // Only the exact absolute path counts: a relative or differently-located file with the same
   // basename is another project, and a bare name on the command line never qualifies.
@@ -261,7 +264,7 @@ export function readinessOf(check: Omit<ReadinessCheck, 'ready' | 'tools' | 'rea
 }
 
 const defaultDelegate = (environment: TpEditorEnvironment) => {
-  const root = path.dirname(environment.projectFile)
+  const root = (isWindowsPath(environment.projectFile) ? path.win32 : path).dirname(environment.projectFile)
   const scripts = environment.scripts ?? {}
   return {
     launch: scripts.launch ?? path.join(root, 'BuildScripts', 'launch-tp-editor.ps1'),

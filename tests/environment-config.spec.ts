@@ -18,11 +18,11 @@ import { Config, machineOf } from '../src/deployment.ts'
  * setup-superagent.mjs is a plain `node` script outside this tsconfig project, so it has no type
  * declarations of its own. Its generated output is what these tests check, so the surface is narrowed here.
  */
-interface RolloutEnvironment { recoveryEnabled?: unknown; projectFile?: string; editorExe?: string; mcpPort?: unknown
+interface RolloutEnvironment { recoveryEnabled?: unknown; projectFile?: string; editorExe?: string | Record<string, string>; mcpPort?: unknown
   captureTool?: string; captureToolset?: string; [key: string]: unknown }
 interface RolloutConfig { enabled: boolean; graphEnabled: boolean; mode: string; stateDir: string; workDir: string; environment?: RolloutEnvironment }
 interface SetupScript {
-  renderEnvironment(environment: RolloutEnvironment | undefined, root?: string): Record<string, unknown> | undefined
+  renderEnvironment(environment: RolloutEnvironment | undefined, root?: string, platform?: string): Record<string, unknown> | undefined
   renderBlock(root: string, config: RolloutConfig): string
 }
 const script = await import('../../setup-superagent.mjs' as string) as SetupScript
@@ -80,6 +80,25 @@ describe('rollout environment section', () => {
   })
   it('does not accept a relative path outside the root that points to a missing file', () => {
     expect(() => renderEnvironment({ ...enabled(), editorExe: '../missing/UnrealEditor.exe' }, dir)).toThrow(/does not exist/)
+  })
+  it('resolves platform-mapped editorExe paths for Windows and macOS/Linux', () => {
+    const { projectFile, editorExe } = files()
+    const macEngine = join(dir, 'Engine', 'Binaries', 'Mac', 'UnrealEditor.app', 'Contents', 'MacOS')
+    mkdirSync(macEngine, { recursive: true })
+    const macEditor = join(macEngine, 'UnrealEditor')
+    writeFileSync(macEditor, '')
+    const mapped = {
+      ...enabled(),
+      projectFile: 'TP.uproject',
+      editorExe: {
+        win32: 'Engine/Binaries/Win64/UnrealEditor.exe',
+        darwin: 'Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor',
+      },
+    }
+    expect(renderEnvironment(mapped, dir, 'win32')).toMatchObject({ projectFile: projectFile.replaceAll('\\', '/'), editorExe: editorExe.replaceAll('\\', '/') })
+    expect(renderEnvironment(mapped, dir, 'darwin')).toMatchObject({ projectFile: projectFile.replaceAll('\\', '/'), editorExe: macEditor.replaceAll('\\', '/') })
+    expect(() => renderEnvironment(mapped, dir, 'linux')).toThrow(/required for platform linux/)
+    expect(() => renderEnvironment({ ...mapped, editorExe: { mac: 'Engine/Binaries/Mac/UnrealEditor' } }, dir, 'darwin')).toThrow(/unsupported platforms: mac/)
   })
   it.each([
     ['a directory that does not exist', () => ({ projectFile: join(dir, 'nope', 'TP.uproject') }), /does not exist/],
