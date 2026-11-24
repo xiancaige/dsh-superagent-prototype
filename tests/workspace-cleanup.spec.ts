@@ -112,4 +112,3 @@ it('unregisters a reclaimed ticket workspace during finalize and keeps retry if 
   expect(h.workspaceRegistry.list().some(workspace => workspace.path === directory)).toBe(false)
   expect(h.agents.has(one.sessionId)).toBe(true)
 })
-
