@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { canAdvanceTicket, followupOwners, key, latestReport, liveTicket, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
+import { blockedForEnvironment, canAdvanceTicket, followupOwners, key, latestAssignment, latestReport, liveTicket, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { IM_WORDS, imSummary } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -79,6 +79,11 @@ export interface Relay { id: string; text: string }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
 const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
   + '(orchestrator_route kind stop with this trigger_id).'
+const STALLED_FOLLOWUP_NOTE = `${FOLLOWUP_NOTE} When a listed ticket is stalled (environment-blocked or failed), answer the person directly with orchestrator_reply purpose=answer.`
+/** Unanswered human follow-up trigger summarized inside a failed/blocked worker report relay. */
+export interface UnansweredTrigger { trigger_id: string; preview: string }
+const isTicketStalledForFollowup = (ticket: Ticket): boolean =>
+  blockedForEnvironment(ticket) || !!ticket.delivery || latestAssignment(ticket)?.modelFailure?.hostResumeBudget === 0
 /**
  * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
@@ -88,32 +93,38 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
   const trigger = store.triggers.get(triggerId)
   const disposition = store.triggers.disposition(triggerId)
   if (!trigger || !followupOwners(trigger, store).length) return undefined
+  let anyStalled = false
   const tickets = disposition!.fanout.flatMap(id => {
     const ticket = store.tickets.get(id)
+    if (!ticket || !liveTicket(ticket)) return []
     const context = disposition!.context?.includes(id) ? { context: true } : {}
-    return ticket && liveTicket(ticket) ? [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context }] : []
+    const stalled = !disposition!.context?.includes(id) && isTicketStalledForFollowup(ticket)
+    if (stalled) anyStalled = true
+    return [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context, ...stalled ? { stalled: true } : {} }]
   })
   if (!tickets.length) return undefined
-  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets)
+  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets,
+    anyStalled ? STALLED_FOLLOWUP_NOTE : FOLLOWUP_NOTE)
 }
 /**
  * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the
  * tickets it reached with their state. Their workers decide it; the main Session may only stop the work on it.
  */
 export function followupRelay(message: { trigger_id: string },
-  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[]): Relay {
-  return { id: `followup:${message.trigger_id}`, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
-    note: FOLLOWUP_NOTE }) }
+  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean; stalled?: boolean }[],
+  note = FOLLOWUP_NOTE): Relay {
+  return { id: `followup:${message.trigger_id}`, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets, note }) }
 }
 /** Formats a worker report relay for the main Session (truncating summaries over 600 characters behind `ticket/<id>/result`), including `completion` and `can_advance` when applicable; `replyTo` names the human question trigger it answers. */
-export function resultRelay(ticket: Ticket, state: string, text: string, replyTo?: string): Relay {
+export function resultRelay(ticket: Ticket, state: string, text: string, replyTo?: string, unansweredTriggers?: readonly UnansweredTrigger[]): Relay {
   const id = key('worker-result', ticket.id, ticket.updatedAt, text)
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const completion = state === 'ready' ? latestReport(ticket)?.completion : undefined
   const advanceable = canAdvanceTicket(ticket)
+  const unanswered = unansweredTriggers?.length ? { unanswered_triggers: unansweredTriggers.slice(-5) } : {}
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state,
     ...completion ? { completion } : {}, ...advanceable ? { can_advance: true } : {},
-    ...replyTo ? { answer_to: replyTo } : {}, ...summary, read: `ticket/${ticket.id}/result` }
+    ...replyTo ? { answer_to: replyTo } : {}, ...unanswered, ...summary, read: `ticket/${ticket.id}/result` }
   return { id: `report:${id}`, text: JSON.stringify(report) }
 }
 /**
@@ -122,7 +133,8 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
  * routine `progress` reports without `answers` stay internal.
  * @returns The steering `Relay`, or `undefined` when the report is not relayed to the main Session.
  */
-export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' | 'summary' | 'question' | 'answers'>): Relay | undefined {
+export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' | 'summary' | 'question' | 'answers'>,
+  unansweredTriggers?: readonly UnansweredTrigger[]): Relay | undefined {
   const asked = report.question ? ticket.attention : undefined
   if (asked) {
     const advanceable = canAdvanceTicket(ticket)
@@ -131,10 +143,10 @@ export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' |
         ...advanceable ? { can_advance: true } : {}, read: `ticket/${ticket.id}/result` }) }
   }
   if (report.state === 'progress' && !report.answers) return undefined
-  return resultRelay(ticket, report.state, report.summary, report.answers)
+  return resultRelay(ticket, report.state, report.summary, report.answers, unansweredTriggers)
 }
 
-const ENV_LOCK_PATTERN = /(?:\bEnvironmentHeld(?:BySelf)?\b|\btp-environment\.lock\b|\bTPCompileRestart\.lock\b|TP environment is held by|环境锁|共享引擎.*?(?:占用|锁)|编译流程被占用|编辑器(?:进程)?.*?占用|\beditor lock\b)/i
+const ENV_LOCK_PATTERN = /(?:\bEnvironmentHeld(?:BySelf)?\b|\btp-environment\.lock\b|\bTPCompileRestart\.lock\b|\btp-source-operation\.lock\b|source checkout is busy|TP environment is held by|环境锁|共享引擎.*?(?:占用|锁)|编译流程被占用|编辑器(?:进程)?.*?占用|\beditor lock\b)/i
 /** Whether a worker's `blocked` summary describes an environment, editor, or shared-engine lock block. */
 export function isEnvironmentLockSummary(summary: string): boolean {
   return ENV_LOCK_PATTERN.test(summary)
@@ -143,7 +155,23 @@ const chineseRequest = (request: string, reason: string): boolean =>
   (/\p{Script=Han}/u.test(request) && !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(request))
   || /\p{Script=Han}/u.test(reason)
 function formatLockReason(reason: string, chinese: boolean): string {
-  const cleaned = reason.replace(/^(?:TP environment block:\s*|Waiting for the TP environment:\s*|EnvironmentHeld(?:BySelf)?:\s*)+/i, '').trim()
+  const cleaned = reason
+    .replace(/^(?:Error:\s*The prepare command failed:\s*|TP environment block:\s*|Waiting for the TP environment:\s*|EnvironmentHeld(?:BySelf)?:\s*)+/i, '')
+    .trim()
+  const sourceBusy = /source checkout is busy \(([^)]+)\):\s*(\{[\s\S]*\})/i.exec(cleaned)
+  if (sourceBusy) {
+    try {
+      const payload = JSON.parse(sourceBusy[2]!) as { pid?: unknown; ticket?: unknown }
+      const pid = typeof payload.pid === 'number' || typeof payload.pid === 'string' ? String(payload.pid) : ''
+      const holderTicket = typeof payload.ticket === 'string' && payload.ticket ? payload.ticket.slice(0, 8) : ''
+      if (chinese) {
+        const who = holderTicket ? `工单 ${holderTicket}${pid ? `（PID ${pid}）` : ''}` : pid ? `PID ${pid}` : '其他操作'
+        return `源工程锁被${who}占用，请确认无运行中的源工程操作后清理锁`
+      }
+      const who = holderTicket ? `ticket ${holderTicket}${pid ? ` (pid ${pid})` : ''}` : pid ? `pid ${pid}` : 'another operation'
+      return `source checkout lock held by ${who}`
+    } catch { /* Fall back to cleaned text below. */ }
+  }
   const held = /TP environment is held by (\S+) (.*?) \(Session pid (\d+)\) since ([^;]+)/i.exec(cleaned)
   if (held) {
     const [, kind, label, pid, since] = held
@@ -168,6 +196,33 @@ export function environmentLockNotices(ticket: Ticket, request: string, reason: 
   const dedup = options.holder || detail.slice(0, 120)
   return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
     id: key('env-lock', ticket.id, options.assignmentId ?? '', dedup, channel.source, JSON.stringify(channel.address)),
+    channel, text, kind: 'notice', ticketId: ticket.id,
+  }))
+}
+function formatFailureReason(summary: string, chinese: boolean): string {
+  const cleaned = summary
+    .replace(/^Model turn failed; host automatic resume budget 0\. Explicit human retry required\.\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned) return chinese ? '执行异常' : 'execution error'
+  return imSummary(cleaned, 35, '…')
+}
+/**
+ * Builds idempotent IM notices when a ticket assignment terminally fails (e.g. prepare failure or terminal model failure)
+ * so Feishu operators never sit without notice even before or without an orchestrator follow-up reply.
+ */
+export function ticketFailedNotices(ticket: Ticket, request: string, summary: string,
+  options: { assignmentId?: string } = {}): OutboundMessage[] {
+  const chinese = chineseRequest(request, summary)
+  const detail = formatFailureReason(summary, chinese)
+  const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 18, '…')
+  const raw = chinese
+    ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）执行失败（${detail}），已暂停等待恢复或重试。`
+    : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) failed (${detail}) and is paused for recovery or retry.`
+  const text = imSummary(raw, IM_WORDS - 5, '…')
+  return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
+    id: key('ticket-failed', ticket.id, options.assignmentId ?? '', channel.source, JSON.stringify(channel.address)),
     channel, text, kind: 'notice', ticketId: ticket.id,
   }))
 }

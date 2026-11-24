@@ -1,7 +1,7 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
 import { DELIVERY_LEVELS, liveTicket, runningAssignment as activeAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
-import { unrespondedHumanFollowups } from '../../executor/dsh.ts'
+import { unrespondedHumanFollowups, unansweredHumanTriggers } from '../../executor/dsh.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -162,7 +162,9 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
-          const relay = reportRelay(updated, report)
+          const unansweredFailedOrBlocked = (args.state === 'blocked' || args.state === 'failed') && !args.reply_to_trigger_id && host.store.triggers
+            ? unansweredHumanTriggers(updated, host.store.triggers) : undefined
+          const relay = reportRelay(updated, report, unansweredFailedOrBlocked)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const lockNotified = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention
             ? host.notifyBlockedLock?.(updated, args.summary) ?? false : false

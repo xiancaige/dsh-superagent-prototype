@@ -1070,6 +1070,24 @@ describe('replies', () => {
     h.engine.handback(live, '5', 'Out of scope.')
     expect(h.engine.reply({ purpose: 'answer', triggerId: '5', text: 'Please clarify what to test.' })).toMatchObject({ status: 'pending' })
   })
+  it('allows purpose=answer once per unanswered trigger when a ticket is stalled in failed, blocked, or delivery failure', () => {
+    const h = harness()
+    const channel = (id: string) => ({ source: 'chat', thread: 't1', address: { message: id } })
+    const ticketId = accepted(h, '1', 't1').ticketId!
+    const followup = trigger('2', { actor: guest, threads: [{ source: 'chat', id: 't1' }], channel: channel('2') })
+    h.tick(1); h.engine.receive(followup); h.settle()
+    // While working, answer is refused.
+    expect(() => h.engine.reply({ purpose: 'answer', triggerId: '2', text: 'Working' })).toThrow(new UserError('noAnswer'))
+    // Once failed without worker answers, orchestrator can answer the unanswered follow-up once (and retry identical text).
+    h.tick(1); h.engine.report(ticketId, { state: 'failed', summary: 'Model turn failed: ECONNRESET' })
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '2', text: 'Stopped on ECONNRESET.' })).toMatchObject({ status: 'pending', reused: false })
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '2', text: 'Stopped on ECONNRESET.' })).toMatchObject({ reused: true })
+    expect(() => h.engine.reply({ purpose: 'answer', triggerId: '2', text: 'Different text.' })).toThrow(new UserError('noAnswer'))
+    // Origin trigger can also be answered once while blocked.
+    const blockedId = accepted(h, '3', 't3').ticketId!
+    h.tick(1); h.engine.report(blockedId, { state: 'blocked', summary: 'Missing lock' })
+    expect(h.engine.reply({ purpose: 'answer', ticketId: blockedId, triggerId: '3', text: 'Blocked on lock.' })).toMatchObject({ status: 'pending', reused: false })
+  })
 })
 describe('ticket commands', () => {
   it('ends a ticket by the same rule on a close and on a ready report: once no PR it opened is open, as the latest of them ended', () => {

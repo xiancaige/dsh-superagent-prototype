@@ -20,7 +20,7 @@ import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, sourceTrigger, triggerMessage, unansweredHumanTriggers, workerSessionId } from '../executor/dsh.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -34,7 +34,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary } from './notices.ts'
+import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, ticketFailedNotices } from './notices.ts'
 import { hasPendingMasterWork, notifyEvalTimeout, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -330,7 +330,18 @@ export class Runtime extends Service implements SourceHost {
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+        repliedTo: trigger => repliedTo({ store, sources }, trigger),
+        notifyTicketFailure: (failed, summary) => {
+          if (!setup.configured()) return false
+          const request = store.triggers.get(failed.origin.triggerId)?.text ?? failed.title
+          const assignmentId = latestAssignment(failed)?.id
+          const messages = isEnvironmentLockSummary(summary)
+            ? environmentLockNotices(failed, request, summary, { assignmentId })
+            : ticketFailedNotices(failed, request, summary, { assignmentId })
+          for (const message of messages) outbox.send(message)
+          return messages.length > 0
+        },
+        unansweredTriggers: failed => unansweredHumanTriggers(failed, store.triggers) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'),

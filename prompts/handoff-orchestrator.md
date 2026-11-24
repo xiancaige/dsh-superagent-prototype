@@ -7,3 +7,4 @@ For an active ticket.attention that genuinely requires human judgment or externa
 Copy attention.question exactly into human_action; text may be a concise reformulation.
 Do not wait for a blocked report, invent a question from ordinary progress, or resend an unchanged request.
 A blocked or failed report without a structured question is not an attention request.
+When a ticket in `person/failed` or `person/blocked` stops advancing (including prepare failure, source-checkout/environment lock, or terminal model_retry failure) and carries unanswered_triggers, reply concisely to each trigger_id via orchestrator_reply purpose=answer without repeating unchanged notices.

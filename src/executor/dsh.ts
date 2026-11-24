@@ -103,6 +103,10 @@ export interface ExecutorHost {
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
+  /** Sends an idempotent IM notice when a launch/model failure stops a ticket before a worker reply. */
+  notifyTicketFailure?(ticket: Ticket, summary: string): boolean
+  /** Returns unanswered human follow-up triggers to surface in failed/blocked worker_report relays. */
+  unansweredTriggers?(ticket: Ticket): { trigger_id: string; preview: string }[]
 }
 /** Looks up a ticket's origin trigger in Store. */
 export const sourceTrigger = (host: { store: Pick<Store, 'triggers'> }, ticket: Ticket): Trigger | undefined =>
@@ -255,7 +259,33 @@ export function unrespondedHumanFollowups(ticket: Ticket, triggers: Pick<Store['
     if (disposition?.handbacks?.some(item => item.ticketId === ticket.id)) continue
     if (ticket.attention?.triggerId === input.triggerId) continue
     if (ticket.answers?.includes(input.triggerId)) continue
+    if (ticket.answered?.includes(input.triggerId)) continue
     result.push(input.triggerId)
+  }
+  return result
+}
+/**
+ * Unanswered human follow-up triggers on `ticket` (both read and unread/undelivered) since the last ready report.
+ * Used when relaying failed/blocked reports so the orchestrator can reply promptly without waiting on a stalled worker.
+ */
+export function unansweredHumanTriggers(ticket: Ticket,
+  triggers: Pick<Store['triggers'], 'get' | 'disposition'>): { trigger_id: string; preview: string }[] {
+  const sinceReady = ticket.assignments.findLast(assignment => assignment.report?.state === 'ready')?.report?.at ?? ''
+  const seen = new Set<string>()
+  const result: { trigger_id: string; preview: string }[] = []
+  for (const input of ticket.inputs) {
+    if (input.kind !== 'trigger' || !input.human || input.context) continue
+    if (input.triggerId === ticket.origin.triggerId) continue
+    const undelivered = ticket.undelivered.includes(input.id) || !input.readAt
+    if (sinceReady && input.at <= sinceReady && !undelivered) continue
+    if (seen.has(input.triggerId)) continue
+    seen.add(input.triggerId)
+    const disposition = triggers.disposition(input.triggerId)
+    if (disposition?.handbacks?.some(item => item.ticketId === ticket.id)) continue
+    if (ticket.attention?.triggerId === input.triggerId) continue
+    if (ticket.answers?.includes(input.triggerId) || ticket.answered?.includes(input.triggerId)) continue
+    const text = triggers.get(input.triggerId)?.text.replace(/\s+/g, ' ').slice(0, 80) ?? ''
+    result.push({ trigger_id: input.triggerId, preview: text })
   }
   return result
 }
@@ -531,7 +561,9 @@ export class DshExecutor implements Executor {
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
       const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
-      this.relay(resultRelay(updated, 'failed', summary))
+      this.host.notifyTicketFailure?.(updated, summary)
+      const unanswered = this.host.unansweredTriggers?.(updated)
+      this.relay(resultRelay(updated, 'failed', summary, undefined, unanswered))
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }

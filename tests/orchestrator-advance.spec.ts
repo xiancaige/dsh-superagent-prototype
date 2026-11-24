@@ -457,4 +457,50 @@ describe('prompt contracts for orchestrator advance and DSH restart verification
       rationale: 'Should stop after consecutive advances without progress.',
     })).rejects.toThrow(/no new progress/i)
   })
+
+  it('nudges once when a failed/blocked report carries unanswered_triggers and stays quiet after answering', async () => {
+    host = await startRuntime()
+    const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修复回复'))
+    const followup = feishu('2', '进度', { mentions: [], root_id: 'om_1' })
+    host.runtime.receive(followup)
+    await host.runtime.idle()
+
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'failed',
+      summary: 'Model turn failed: ECONNRESET',
+    })
+    await host.runtime.idle()
+
+    const masterAgent = host.agents.get(host.runtime.masterId)!
+    const masterCtx = (masterAgent as unknown as { ctx: import('@deepseek-ai/cordis').Context }).ctx
+    const relayMessage = masterAgent.inbox.nextStep.at(-1)!
+    const parsedRelay = JSON.parse((relayMessage.content[0] as { text: string }).text) as { unanswered_triggers?: { trigger_id: string }[] }
+    expect(parsedRelay.unanswered_triggers).toEqual([expect.objectContaining({ trigger_id: followup.id })])
+
+    await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [relayMessage], turn: 20, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [relayMessage] }),
+    )
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 20, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).toHaveBeenCalledTimes(1)
+    const nudge = JSON.parse((masterAgent.steer.mock.calls[0]![0].content[0] as { text: string }).text) as { kind: string; ticket_ids: string[] }
+    expect(nudge).toMatchObject({ kind: 'supervisor_nudge', ticket_ids: [ticket.id] })
+
+    await masterCtx.waterfall(
+      'agent/pre-step',
+      { agent: masterAgent, messages: [relayMessage], turn: 21, step: 1, signal: new AbortController().signal, modelSelection: {} } as never,
+      async () => ({ kind: 'enter' as const, messages: [relayMessage] }),
+    )
+    await host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      ticket_id: ticket.id,
+      trigger_id: followup.id,
+      purpose: 'answer',
+      text: '工单因模型连接中断暂停，等待重试。',
+    })
+    masterAgent.steer.mockClear()
+    await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 21, signal: new AbortController().signal } as never)
+    expect(masterAgent.steer).not.toHaveBeenCalled()
+  })
 })

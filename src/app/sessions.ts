@@ -7,7 +7,7 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { canAdvanceTicket, key, latestReport, liveTicket, type Ticket } from '../core/index.ts'
+import { blockedForEnvironment, canAdvanceTicket, key, latestReport, liveTicket, waitsForPerson, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -107,26 +107,33 @@ function isNonRecoveryRelay(event: SessionEvent): boolean {
     || (source.kind === 'plugin' && source.plugin === 'dsh-superagent')
 }
 
-function supervisorReports(messages: readonly UserMessage[]): { inject: boolean; ticketIds: string[] } {
+function supervisorReports(messages: readonly UserMessage[]): { inject: boolean; ticketIds: string[]; unansweredTicketIds: string[] } {
   let inject = false
   const ticketIds: string[] = []
+  const unansweredTicketIds: string[] = []
   for (const message of messages) {
     const source = message.source as { kind?: unknown; plugin?: unknown }
     if (source.kind !== 'dsh-superagent' && !(source.kind === 'plugin' && source.plugin === 'dsh-superagent')) continue
     for (const block of message.content) {
       if (block.type !== 'text') continue
       try {
-        const parsed = JSON.parse(block.text) as { kind?: unknown; ticket?: { ticket_id?: unknown } }
+        const parsed = JSON.parse(block.text) as { kind?: unknown; state?: unknown; unanswered_triggers?: unknown; ticket?: { ticket_id?: unknown } }
         if (parsed.kind === 'worker_report' || parsed.kind === 'worker_attention') {
           inject = true
-          if (typeof parsed.ticket?.ticket_id === 'string') ticketIds.push(parsed.ticket.ticket_id)
+          if (typeof parsed.ticket?.ticket_id === 'string') {
+            ticketIds.push(parsed.ticket.ticket_id)
+            if ((parsed.state === 'failed' || parsed.state === 'blocked')
+              && Array.isArray(parsed.unanswered_triggers) && parsed.unanswered_triggers.length > 0) {
+              unansweredTicketIds.push(parsed.ticket.ticket_id)
+            }
+          }
         } else if (parsed.kind === 'supervisor_nudge') {
           inject = true
         }
       } catch { /* Non-JSON message: ignore. */ }
     }
   }
-  return { inject, ticketIds }
+  return { inject, ticketIds, unansweredTicketIds }
 }
 
 /**
@@ -429,6 +436,7 @@ export class Sessions {
     let turnNumber = 0
     let nudgedThisTurn = false
     const turnTickets = new Set<string>()
+    const unansweredTickets = new Set<string>()
     const answeredOnlyTickets = new Set<string>()
     const resolvedTickets = new Set<string>()
     const recordAction = (toolName: string, rawArgs: unknown, output: unknown): void => {
@@ -478,11 +486,13 @@ export class Sessions {
             turnNumber = turn
             nudgedThisTurn = false
             turnTickets.clear()
+            unansweredTickets.clear()
             answeredOnlyTickets.clear()
             resolvedTickets.clear()
           }
           const reports = supervisorReports(messages)
           for (const tid of reports.ticketIds) turnTickets.add(tid)
+          for (const tid of reports.unansweredTicketIds) unansweredTickets.add(tid)
           if (!reports.inject) return decision
           if (decision.messages.some(message => message.source.kind === 'skill-invocation' && message.source.name === supervisorSkill.name)) {
             return decision
@@ -520,7 +530,28 @@ export class Sessions {
             if (answeredOnlyTickets.has(id)) return false
             return state === 'waiting' || state === 'blocked' || state === 'failed'
           })
-          if (!pending.length) return
+          if (!pending.length) {
+            const unansweredPending = [...unansweredTickets].filter(id => {
+              if (resolvedTickets.has(id) || answeredOnlyTickets.has(id)) return false
+              const current = host.store.tickets.get(id)
+              if (!current || !liveTicket(current)) return false
+              if (!waitsForPerson(current) && !current.delivery && !blockedForEnvironment(current)) return false
+              return current.inputs.some(input => input.kind === 'trigger' && input.human && !input.context
+                && input.triggerId !== current.origin.triggerId
+                && !current.answered?.includes(input.triggerId) && !current.answers?.includes(input.triggerId))
+            })
+            if (!unansweredPending.length) return
+            nudgedThisTurn = true
+            agent.steer(createUserMessage({
+              content: [{ type: 'text', text: JSON.stringify({
+                kind: 'supervisor_nudge',
+                ticket_ids: unansweredPending,
+                action: 'Failed/blocked worker report(s) in this turn carry unanswered human follow-up(s) (unanswered_triggers). Reply concisely to each trigger_id via orchestrator_reply purpose=answer so the requester receives the current failure/blocker status.',
+              }) }],
+              source: { kind: 'dsh-superagent', form: 'relay' },
+            }))
+            return
+          }
           nudgedThisTurn = true
           agent.steer(createUserMessage({
             content: [{ type: 'text', text: JSON.stringify({

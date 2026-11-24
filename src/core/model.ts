@@ -331,6 +331,8 @@ export interface Ticket {
   follows?: Follow[]
   /** People's questions the worker answered, whose answers the main Session may send. */
   answers?: string[]
+  /** Human triggers already answered via `purpose=answer` (by worker report or stalled-ticket fallback). */
+  answered?: string[]
   createdAt: string
   updatedAt: string
   /** The Triggers it was accepted from: the one that started it, and the batch its Eval held. */
