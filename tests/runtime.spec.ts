@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -1868,4 +1868,46 @@ it('admits experience_read and experience_feedback into worker tool allowlist wh
   child.ctx.tools.restrict = (rule: { allow: string[] }) => { seen.push(rule); return () => {} }
   await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
   expect(seen.at(-1)?.allow).toEqual(['read', 'experience_read', 'experience_feedback'])
+})
+
+it('creates the main Session in the project root instead of a nested stateDir when projectFile or sourceRoot is configured', async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-project-'))
+  try {
+    const stateDir = join(projectRoot, '.dsh', 'home', 'state', 'superagent')
+    mkdirSync(stateDir, { recursive: true })
+    const store = new Store(join(stateDir, 'orchestrator.sqlite'))
+    seed(store); store.close()
+    await runtime.stop()
+    agents.clear()
+    controller.create.mockClear()
+    const ctx = new Context()
+    for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+    runtime = new Runtime(ctx, testMachine({
+      executionMode: 'local',
+      stateDir,
+      environment: {
+        recoveryEnabled: true,
+        projectFile: join(projectRoot, 'TP.uproject'),
+        editorExe: join(projectRoot, 'UnrealEditor.exe'),
+        mcpPort: 55255,
+        captureTool: 'CaptureWidgetBlueprintScreenshot',
+        captureToolset: 'TPEditor.TPEditorToolset',
+        waitSeconds: 30,
+      },
+    }), restarts)
+    await runtime.ready
+    expect(controller.create).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: runtime.masterId,
+      workspaceId: projectRoot,
+      agentPreset: 'dsh-superagent-router',
+    }))
+    const patch = readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8')
+    const routerSection = patch.slice(patch.indexOf('id: dsh-superagent-router-preset'))
+    expect(routerSection).toContain('projectRootMarkers:')
+    expect(routerSection).toContain('- CLAUDE.md')
+    expect(routerSection).toContain('- AGENTS.md')
+  } finally {
+    await runtime?.stop()
+    rmSync(projectRoot, { recursive: true, force: true })
+  }
 })

@@ -198,6 +198,12 @@
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
+              # stateDir often lives inside a submodule (e.g. .dsh/home/state/superagent); skip submodule .git to reach the repo root instruction entry.
+              projectRootMarkers:
+                - CLAUDE.md
+                - AGENTS.md
+                - CLAUDE.local.md
+                - AGENTS.local.md
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
           # DSH rc.2 owns sandbox executors on the host plane; presets select tools only.

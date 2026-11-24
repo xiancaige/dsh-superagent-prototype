@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -491,7 +491,10 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.mounted.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    const projectRoot = this.mounted.sourceRoot
+      || (this.mounted.environment?.recoveryEnabled && this.mounted.environment.projectFile ? dirname(this.mounted.environment.projectFile) : undefined)
+    const masterCwd = projectRoot && existsSync(projectRoot) ? projectRoot : this.mounted.stateDir
+    await this.sessions.ensure(this.masterId, masterCwd, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
