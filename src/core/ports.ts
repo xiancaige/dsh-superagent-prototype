@@ -120,6 +120,8 @@ export interface DomainEvents {
   'ticket.ended': { ticketId: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   'assignment.started': { ticketId: string; assignmentId: string }
   'assignment.ended': { ticketId: string; assignmentId: string; reason: string }
+  /** An open ticket's assignment was marked failed during interruption recovery (e.g. persisted terminal `modelFailure`). */
+  'assignment.failed': { ticketId: string; assignmentId: string; summary: string; modelFailure?: boolean }
   'thread.subscribed': { threadKey: string; ticketId: string }
   /** A person dropped every ticket's Subscription, or a ticket's Executor its own, for `reason`. */
   'thread.unsubscribed': { threadKey: string; ticketId: string; by: 'person' | 'executor'; reason?: string }

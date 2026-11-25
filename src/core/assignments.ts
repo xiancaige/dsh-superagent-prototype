@@ -96,8 +96,11 @@ export class Assignments extends EnginePart {
       && (!running.deliveredAt || running.deliveredAt <= running.modelFailure.at)) {
       // Persisted before the async error report: a crash in that gap must not rebill a
       // model turn, nor may equal millisecond timestamps replenish the budget.
-      if (report?.state !== 'failed') this.report(ticketId, { state: 'failed', summary:
-        `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${running.modelFailure.error}` })
+      if (report?.state !== 'failed') {
+        const summary = `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${running.modelFailure.error}`
+        this.report(ticketId, { state: 'failed', summary })
+        this.emit('assignment.failed', { ticketId, assignmentId: running.id, summary, modelFailure: true })
+      }
       if (ticket.undelivered.length) this.options.executor.deliver(this.require(ticketId), running)
       return
     }

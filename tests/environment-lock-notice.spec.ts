@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { environmentLockNotices, isEnvironmentLockSummary } from '../src/app/notices.ts'
+import { environmentLockNotices, isEnvironmentLockSummary, ticketFailedNotices } from '../src/app/notices.ts'
 import { wordCount, IM_WORDS } from '../src/infra/text.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { githubChannel } from '../src/sources/github-trigger.ts'
@@ -129,5 +129,96 @@ describe('environment lock Feishu notices', () => {
       purpose: 'answer',
       text: '知识库工单因模型连接 ECONNRESET 暂停，已保留已有修改，等待重试。',
     })).resolves.toEqual({ status: 'sent' })
+  })
+
+  it('formats watchdog interruption notices concisely within the word limit', () => {
+    const ticket = {
+      id: '52b61cc89d6cef6542fb438c392e3b4d',
+      title: '实施 worker 错误中断的飞书兜底通知',
+      channels: [feishuChannel('oc_team', 'om_1', true)],
+    } as never
+    const zhLost = ticketFailedNotices(ticket, '继续', 'Worker session interrupted (has no Session); host restarted a new assignment for automatic recovery.', {
+      assignmentId: 'a1',
+      restarted: true,
+    })
+    expect(zhLost).toHaveLength(1)
+    expect(zhLost[0]!.text).toContain('工作会话丢失')
+    expect(zhLost[0]!.text).toContain('自动重新排队恢复')
+    expect(wordCount(zhLost[0]!.text)).toBeLessThanOrEqual(IM_WORDS)
+
+    const enTicket = {
+      id: '52b61cc89d6cef6542fb438c392e3b4d',
+      title: 'Fix worker timeout notice',
+      channels: [feishuChannel('oc_team', 'om_1', true)],
+    } as never
+    const enStale = ticketFailedNotices(enTicket, 'fix it',
+      'Worker session interrupted (stopped without reporting 16 minutes ago); host restarted a new assignment for automatic recovery.', {
+        assignmentId: 'a2',
+        restarted: true,
+      })
+    expect(enStale).toHaveLength(1)
+    expect(enStale[0]!.text).toContain('stopped without reporting 16 minutes ago')
+    expect(enStale[0]!.text).toContain('automatic recovery')
+    expect(wordCount(enStale[0]!.text)).toBeLessThanOrEqual(IM_WORDS)
+  })
+
+  it('notifies Feishu and relays once when watchdog recovers missing-session or idle-stale workers, and ignores settled ones', async () => {
+    h = await startRuntime()
+    const lost = await h.acceptedTicket(feishu('1', '@bot 修复会话丢失'))
+    h.agents.delete(lost.sessionId)
+    const sweep = () => (h!.runtime as unknown as { executor: { sweepStale(): void } }).executor.sweepStale()
+    sweep()
+    await h.runtime.idle()
+
+    const lostStored = h.runtime.store.tickets.get(lost.ticket.id)!
+    expect(lostStored.assignments[0]!.state).toBe('ended')
+    expect(lostStored.assignments[0]!.endedReason).toBe('hostRestarted')
+    expect(lostStored.assignments).toHaveLength(2)
+    const lostNotices = h.runtime.store.receipts.list().filter(item => item.ticketId === lost.ticket.id && item.kind === 'notice')
+    expect(lostNotices).toHaveLength(1)
+    expect(lostNotices[0]!.text).toContain('工作会话丢失')
+    expect(h.relays(h.runtime.masterId).findLast(item => item.kind === 'worker_report')).toMatchObject({
+      kind: 'worker_report',
+      ticket: { ticket_id: lost.ticket.id },
+      state: 'progress',
+      summary: expect.stringContaining('has no Session'),
+    })
+
+    const stale = await h.acceptedTicket(feishu('2', '@bot 修复长时间无汇报'))
+    const staleAgent = h.agents.get(stale.sessionId)!
+    staleAgent.status = 'idle'
+    const staleStored = h.runtime.store.tickets.get(stale.ticket.id)!
+    staleStored.assignments[0]!.startedAt = new Date(Date.now() - 20 * 60_000).toISOString()
+    h.runtime.store.tickets.save(staleStored)
+    sweep()
+    await h.runtime.idle()
+
+    const staleAfter = h.runtime.store.tickets.get(stale.ticket.id)!
+    expect(staleAfter.assignments[0]!.state).toBe('ended')
+    expect(staleAfter.assignments[0]!.endedReason).toBe('hostRestarted')
+    const staleNotices = h.runtime.store.receipts.list().filter(item => item.ticketId === stale.ticket.id && item.kind === 'notice')
+    expect(staleNotices).toHaveLength(1)
+    expect(staleNotices[0]!.text).toContain('工作会话超时未汇报')
+    expect(h.relays(h.runtime.masterId).findLast(item => item.kind === 'worker_report')).toMatchObject({
+      kind: 'worker_report',
+      ticket: { ticket_id: stale.ticket.id },
+      state: 'progress',
+      summary: expect.stringContaining('stopped without reporting'),
+    })
+
+    // A worker that already reported waiting/blocked and has no undelivered inputs must not trigger watchdog notices.
+    const settled = await h.acceptedTicket(feishu('3', '@bot 等待确认'))
+    await h.runTool(settled.sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Need confirmation', human_action: 'Confirm?' })
+    await h.runtime.idle()
+    const settledRelaysBefore = h.relays(h.runtime.masterId).length
+    h.agents.get(settled.sessionId)!.status = 'idle'
+    const settledStored = h.runtime.store.tickets.get(settled.ticket.id)!
+    settledStored.assignments[0]!.report!.at = new Date(Date.now() - 20 * 60_000).toISOString()
+    h.runtime.store.tickets.save(settledStored)
+    sweep()
+    await h.runtime.idle()
+    expect(h.runtime.store.tickets.get(settled.ticket.id)!.assignments).toHaveLength(1)
+    expect(h.runtime.store.receipts.list().filter(item => item.ticketId === settled.ticket.id && item.kind === 'notice')).toHaveLength(0)
+    expect(h.relays(h.runtime.masterId)).toHaveLength(settledRelaysBefore)
   })
 })

@@ -34,7 +34,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, ticketFailedNotices } from './notices.ts'
+import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
 import { hasPendingMasterWork, notifyEvalTimeout, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -329,20 +329,21 @@ export class Runtime extends Service implements SourceHost {
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
+      const notifyTicketFailure = (failed: Ticket, summary: string, options?: { assignmentId?: string; restarted?: boolean }): boolean => {
+        if (!setup.configured()) return false
+        const request = store.triggers.get(failed.origin.triggerId)?.text ?? failed.title
+        const assignmentId = options?.assignmentId ?? latestAssignment(failed)?.id
+        const messages = isEnvironmentLockSummary(summary)
+          ? environmentLockNotices(failed, request, summary, { assignmentId })
+          : ticketFailedNotices(failed, request, summary, { assignmentId, restarted: options?.restarted })
+        for (const message of messages) outbox.send(message)
+        return messages.length > 0
+      }
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger),
-        notifyTicketFailure: (failed, summary) => {
-          if (!setup.configured()) return false
-          const request = store.triggers.get(failed.origin.triggerId)?.text ?? failed.title
-          const assignmentId = latestAssignment(failed)?.id
-          const messages = isEnvironmentLockSummary(summary)
-            ? environmentLockNotices(failed, request, summary, { assignmentId })
-            : ticketFailedNotices(failed, request, summary, { assignmentId })
-          for (const message of messages) outbox.send(message)
-          return messages.length > 0
-        },
+        notifyTicketFailure,
         unansweredTriggers: failed => unansweredHumanTriggers(failed, store.triggers) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
@@ -414,6 +415,15 @@ export class Runtime extends Service implements SourceHost {
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+          }
+          if (event.type === 'assignment.failed') {
+            const failed = store.tickets.get(event.data.ticketId)
+            if (failed) {
+              notifyTicketFailure(failed, event.data.summary, { assignmentId: event.data.assignmentId })
+              const unanswered = unansweredHumanTriggers(failed, store.triggers)
+              const relay = resultRelay(failed, 'failed', event.data.summary, undefined, unanswered)
+              sessions.relay(relay.id, relay.text)
+            }
           }
           if (event.type === 'decision.recorded' && event.data.kind === 'unavailable') {
             const decision = store.decisions.get(event.data.decisionId)

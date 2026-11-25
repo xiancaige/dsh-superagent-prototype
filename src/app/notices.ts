@@ -205,21 +205,35 @@ function formatFailureReason(summary: string, chinese: boolean): string {
     .replace(/^Error:\s*/i, '')
     .replace(/\s+/g, ' ')
     .trim()
+  const interrupted = /^Worker session interrupted \(([^)]+)\);/.exec(cleaned)
+  if (interrupted) {
+    const why = interrupted[1]!.trim()
+    if (chinese) {
+      if (why === 'has no Session') return '工作会话丢失'
+      const stale = /^stopped without reporting (\d+) minutes ago$/i.exec(why)
+      if (stale) return `工作会话超时未汇报（${stale[1]} 分钟）`
+    }
+    return imSummary(why, 35, '…')
+  }
   if (!cleaned) return chinese ? '执行异常' : 'execution error'
   return imSummary(cleaned, 35, '…')
 }
 /**
  * Builds idempotent IM notices when a ticket assignment terminally fails (e.g. prepare failure or terminal model failure)
- * so Feishu operators never sit without notice even before or without an orchestrator follow-up reply.
+ * or is interrupted and auto-restarted by the watchdog, so Feishu operators never sit without notice even before or without an orchestrator follow-up reply.
  */
 export function ticketFailedNotices(ticket: Ticket, request: string, summary: string,
-  options: { assignmentId?: string } = {}): OutboundMessage[] {
+  options: { assignmentId?: string; restarted?: boolean } = {}): OutboundMessage[] {
   const chinese = chineseRequest(request, summary)
   const detail = formatFailureReason(summary, chinese)
   const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 18, '…')
-  const raw = chinese
-    ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）执行失败（${detail}），已暂停等待恢复或重试。`
-    : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) failed (${detail}) and is paused for recovery or retry.`
+  const raw = options.restarted
+    ? chinese
+      ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）工作会话中断（${detail}），宿主已自动重新排队恢复。`
+      : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) session interrupted (${detail}); host requeued it for automatic recovery.`
+    : chinese
+      ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）执行失败（${detail}），已暂停等待恢复或重试。`
+      : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) failed (${detail}) and is paused for recovery or retry.`
   const text = imSummary(raw, IM_WORDS - 5, '…')
   return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
     id: key('ticket-failed', ticket.id, options.assignmentId ?? '', channel.source, JSON.stringify(channel.address)),

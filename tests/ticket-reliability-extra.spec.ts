@@ -2,9 +2,12 @@ import { afterEach, expect, it } from 'vitest'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
-it('keeps terminal model failure settled after persisted restore even before its failed report', async () => {
+it('keeps terminal model failure settled after persisted restore even before its failed report, and sends idempotent notice + relay', async () => {
   h = await startRuntime()
   const { ticket } = await h.acceptedTicket(feishu('1', '@bot fix'))
+  const followup = feishu('2', '进度', { mentions: [], root_id: 'om_1' })
+  h.runtime.receive(followup)
+  await h.runtime.idle()
   const stored = h.runtime.store.tickets.get(ticket.id)!
   const assignment = stored.assignments.at(-1)!
   const at = new Date().toISOString()
@@ -13,11 +16,33 @@ it('keeps terminal model failure settled after persisted restore even before its
   delete assignment.report
   h.runtime.store.tickets.save(stored)
   h.runtime.engine.assignmentInterrupted(ticket.id, assignment.id)
+  await h.runtime.idle()
   const restored = h.runtime.store.tickets.get(ticket.id)!
   expect(restored.assignments).toHaveLength(1)
   expect(restored.assignments[0]!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('budget 0') })
+  const notices = h.runtime.store.receipts.list().filter(item => item.ticketId === ticket.id && item.kind === 'notice')
+  expect(notices).toHaveLength(1)
+  expect(notices[0]!.text).toContain('TIMEOUT after model retries')
+  const relays = h.relays(h.runtime.masterId).filter(item => item.kind === 'worker_report')
+  expect(relays).toHaveLength(1)
+  expect(relays[0]).toMatchObject({
+    kind: 'worker_report',
+    ticket: { ticket_id: ticket.id },
+    state: 'failed',
+    unanswered_triggers: [expect.objectContaining({ trigger_id: followup.id })],
+  })
+  // Re-running interruption recovery does not duplicate the assignment, Feishu notice, or relay.
   h.runtime.engine.assignmentInterrupted(ticket.id, assignment.id)
+  await h.runtime.idle()
   expect(h.runtime.store.tickets.get(ticket.id)!.assignments).toHaveLength(1)
+  expect(h.runtime.store.receipts.list().filter(item => item.ticketId === ticket.id && item.kind === 'notice')).toHaveLength(1)
+  expect(h.relays(h.runtime.masterId).filter(item => item.kind === 'worker_report')).toHaveLength(1)
+  await expect(h.runTool(h.runtime.masterId, 'orchestrator_reply', {
+    ticket_id: ticket.id,
+    trigger_id: followup.id,
+    purpose: 'answer',
+    text: '工单因模型超时失败暂停，等待确认后重试。',
+  })).resolves.toEqual({ status: 'sent' })
 })
 it('rejects globally ambiguous short ids even when only one match subscribes to the thread', async () => {
   h = await startRuntime()

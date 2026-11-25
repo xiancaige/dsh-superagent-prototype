@@ -104,8 +104,8 @@ export interface ExecutorHost {
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
-  /** Sends an idempotent IM notice when a launch/model failure stops a ticket before a worker reply. */
-  notifyTicketFailure?(ticket: Ticket, summary: string): boolean
+  /** Sends an idempotent IM notice when a launch/model failure or watchdog interruption affects a ticket before a worker reply. */
+  notifyTicketFailure?(ticket: Ticket, summary: string, options?: { assignmentId?: string; restarted?: boolean }): boolean
   /** Returns unanswered human follow-up triggers to surface in failed/blocked worker_report relays. */
   unansweredTriggers?(ticket: Ticket): { trigger_id: string; preview: string }[]
 }
@@ -766,18 +766,37 @@ export class DshExecutor implements Executor {
       const assignment = runningAssignment(ticket)
       if (!assignment) continue
       const agent = this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)
-      // A worker still in a turn is working, not stale, however long its step takes.
-      if (agent?.status === 'running') continue
+      // A worker still in a turn or settling background work is active, not stale.
+      if (agent?.status === 'running' || (agent && this.settling.has(ticket.id))) continue
+      const report = assignment.report
+      const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
+      const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
+      if (settled && !ticket.undelivered.length) continue
       // No Session at all means the worker is gone outright — never launched here, or killed with its record left behind —
       // so its Assignment ends at once: waiting for the timeout would keep the TP environment held for a worker that cannot
       // release it. A Session that exists but reports nothing still gets the full timeout, since it may be between steps.
       const last = assignment.report?.at ?? assignment.startedAt ?? assignment.createdAt
       const quiet = Date.now() - Date.parse(last)
       if (agent && (!Number.isFinite(quiet) || quiet < WATCHDOG_STALE_MS)) continue
+      if (settled) {
+        this.host.engine.assignmentInterrupted(ticket.id, assignment.id)
+        continue
+      }
       const why = agent ? `stopped without reporting ${Math.round(quiet / 60_000)} minutes ago` : 'has no Session'
       this.host.health.set({ state: 'error', at: now(), detail: `Worker of ticket ${ticket.id} ${why}; ended its assignment` })
       this.stopWork(ticket.id, 'worker stopped without reporting', true)
       this.host.engine.assignmentInterrupted(ticket.id, assignment.id)
+      const after = this.host.store.tickets.get(ticket.id)
+      const previous = after?.assignments.find(item => item.id === assignment.id)
+      if (after && previous?.state === 'ended' && previous.endedReason === 'hostRestarted') {
+        const summary = `Worker session interrupted (${why}); host restarted a new assignment for automatic recovery.`
+        this.host.store.atomic(() => {
+          const current = this.host.store.tickets.get(ticket.id)
+          if (!current) return
+          this.host.notifyTicketFailure?.(current, summary, { assignmentId: assignment.id, restarted: true })
+          this.relay(resultRelay(current, 'progress', summary))
+        })
+      }
     }
   }
   /**
