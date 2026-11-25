@@ -9,7 +9,7 @@ import { modelCardAction, modelMenuAction } from './feishu-model-card.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { feishuEnvironment } from '../infra/feishu-environment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
-import { readFeishu, type FeishuRef } from './feishu-read.ts'
+import { readFeishu, restoreFeishuTriggerFiles, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
@@ -117,7 +117,8 @@ async function consume(ctx: SourceContext, signal: AbortSignal, eventKey: string
       const chats = ctx.state.get(KV.feishu.chats) ?? {}
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
       ctx.state.set(KV.feishu.chats, chats)
-      await receive(ctx, trigger)
+      const restored = await restoreFeishuTriggerFiles(ctx.commands.withSignal(signal), trigger)
+      if (enabled(ctx) && !signal.aborted) await receive(ctx, restored)
     }).catch(error => { ctx.report('feishu', { state: 'error', detail: String(error) }) })
   })
   try {

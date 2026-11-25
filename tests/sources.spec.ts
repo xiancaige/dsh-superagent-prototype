@@ -1046,7 +1046,15 @@ describe('feishu event consumer', () => {
   function cli(mode: 'never' | 'warn' | 'ready' | 'flaky' | 'events' | 'late'): string {
     const path = join(dir, 'lark-bot')
     writeFileSync(path, `#!/bin/sh
-  [ "$1" = event ] || { echo '{"ok":true,"data":{}}'; exit 0; }
+  if [ "$1" != event ]; then
+    case "$*" in
+      *om_1*) echo '{"ok":true,"data":{"items":[{"message_id":"om_1","chat_id":"oc_group","body":{"content":"{}"}}]}}' ;;
+      *om_2*) echo '{"ok":true,"data":{"items":[{"message_id":"om_2","chat_id":"oc_dm","body":{"content":"{}"}}]}}' ;;
+      *om_3*) echo '{"ok":true,"data":{"items":[{"message_id":"om_3","chat_id":"oc_group","body":{"content":"{}"}}]}}' ;;
+      *) echo '{"ok":true,"data":{}}' ;;
+    esac
+    exit 0
+  fi
   n=$(cat '${dir}/runs' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '${dir}/runs'; echo $$ > '${dir}/pid'
   case ${mode} in
     never) exec sleep 60 ;;

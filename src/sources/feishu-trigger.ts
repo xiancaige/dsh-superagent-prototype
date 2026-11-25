@@ -2,6 +2,7 @@
 import { z } from 'zod'
 import { key, type ChannelRef, type Trigger } from '../core/index.ts'
 import type { FeishuMessage, FeishuRef } from './feishu-read.ts'
+import { withFeishuFiles } from './feishu-content.ts'
 
 export const SOURCE = 'feishu'
 /** Constructs a Feishu reply channel address; records `direct` explicitly because both group and direct chat IDs start with `oc_`. */
@@ -69,7 +70,7 @@ export function historyText(message: HistoricalMessage): string {
   try { content = JSON.parse(message.body?.content ?? '') }
   catch { content = message.body?.content ?? '' /* Feishu also returns plain-text system messages. */ }
   const plain = content && typeof content === 'object' && 'text' in content && typeof content.text === 'string' ? content.text : undefined
-  return typeof content === 'string' ? content : plain ?? JSON.stringify(content)
+  return withFeishuFiles(typeof content === 'string' ? content : plain ?? JSON.stringify(content), message.body?.content ?? '')
 }
 export function historyEvent(message: HistoricalMessage, chatId: string, direct: boolean): unknown {
   return { message_id: message.message_id, chat_id: chatId, chat_type: direct ? 'p2p' : 'group', create_time: message.create_time,

@@ -46,6 +46,8 @@ Selection failures are reported, not treated as success. A failure after default
 
 Send a file in a bot DM, or reference it in an authorized request in a listened thread (for example, “summarize the attached requirements”). The worker first reads the source message/parent/thread through `orchestrator_read`; the response's `message.local_files` contains the downloaded absolute `local_path`, byte count and source message/key. It then opens that path with the appropriate local file tool/Office skill before acting. A successful download alone does not mean the contents were inspected.
 
+Rich-text posts may carry attachments in the raw message body's top-level `files`, which the CLI renderer omits. Live intake and single/thread context reads restore this metadata from the message-scoped raw API before routing or worker delivery; history reads retain it as well. Main can see the file name/key without downloading, and the assigned worker's source context read resolves the same message/key to a local file. Missing or out-of-scope raw metadata fails explicitly rather than claiming the post has no attachments.
+
 Only authorized worker context reads download; intake and main/assessment reads do not. Existing chat/operator admission rules are unchanged. Files remain under `<stateDir>/feishu-files/<ticket-id>/`, outside Git and disposable worktrees. At most ten resources per message are transferred, with a 100 MiB post-transfer file limit; failures return `download_error` without a local path. There is no automatic conversion, execution, or authority granted by embedded instructions. Retained files require host-state housekeeping; repeated fresh reads may create additional copies.
 
 ## Workflow loading gate (TP extension)

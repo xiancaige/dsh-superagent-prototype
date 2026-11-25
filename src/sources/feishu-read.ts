@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { Trigger } from '../core/index.ts'
 import { validItems, type Commands } from '../infra/commands.ts'
 import { admissionImageKeys, readAdmissionImage } from './feishu-image.ts'
+import { rawFeishuBodies, withFeishuFiles } from './feishu-content.ts'
 import { feishuRef, feishuTime, HistoricalMessageSchema, HistoryPageSchema, historyText, withMentionNames, type HistoricalMessage }
   from './feishu-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
@@ -65,6 +66,20 @@ async function sourceOf(commands: Commands, ref: FeishuRef) {
 
 export interface FeishuPage<M> { status: string; thread_id?: string; messages: M[]; next_resource: string | null; skipped?: number }
 export interface FeishuOne<M> { status: string; message: M | null }
+/** Keep the CLI's rendered text/forwards but restore post attachments from the raw API. */
+async function restoreFiles(commands: Commands, chatId: string, messages: FeishuMessage[]): Promise<FeishuMessage[]> {
+  const posts = messages.filter(message => message.msg_type === 'post' && !message.deleted)
+  if (!posts.length) return messages
+  const bodies = await rawFeishuBodies(commands, chatId, posts.map(message => message.message_id))
+  return messages.map(message => ({ ...message, content: withFeishuFiles(message.content ?? '', bodies.get(message.message_id) ?? '') }))
+}
+/** Live events are already CLI-rendered, too. Preserve metadata before the trigger enters routing/worker delivery. */
+export async function restoreFeishuTriggerFiles(commands: Commands, trigger: Trigger): Promise<Trigger> {
+  const ref = feishuRef(trigger)
+  if (!ref) throw new Error('A Feishu source trigger is required')
+  const bodies = await rawFeishuBodies(commands, ref.chatId, [ref.messageId])
+  return { ...trigger, text: withFeishuFiles(trigger.text, bodies.get(ref.messageId)!) }
+}
 /** Fetches one message or a bounded topic page of a Trigger's source message with explicit pagination continuation. */
 export async function readFeishu(commands: Commands, ref: FeishuRef, resource: string, pageSize: number,
   order: 'asc' | 'desc' = 'asc'): Promise<FeishuPage<FeishuMessage> | FeishuOne<FeishuMessage>> {
@@ -83,7 +98,7 @@ export async function readFeishu(commands: Commands, ref: FeishuRef, resource: s
       || (message.thread_id && message.thread_id !== source.thread_id))
     if (result.thread_id !== source.thread_id || outside) throw new Error('Feishu returned messages outside the source thread')
     if (result.has_more && (!result.page_token || result.page_token === request.cursor)) throw new Error('Feishu thread pagination did not advance; history is incomplete')
-    return { status: 'available', thread_id: result.thread_id, messages, ...tally.skipped ? { skipped: tally.skipped } : {},
+    return { status: 'available', thread_id: result.thread_id, messages: await restoreFiles(commands, ref.chatId, messages), ...tally.skipped ? { skipped: tally.skipped } : {},
       next_resource: result.has_more ? `feishu/${ref.triggerId}/thread/${encodeURIComponent(result.page_token!)}` : null }
   }
   const target = request.section === 'root' ? source.root_id : request.section === 'parent' ? source.parent_id : source.message_id
@@ -93,7 +108,7 @@ export async function readFeishu(commands: Commands, ref: FeishuRef, resource: s
   const message = result.messages.find(message => message.message_id === target)
   if (!message) throw new Error('The requested Feishu message is unavailable; do not infer its contents')
   if (message.chat_id !== source.chat_id) throw new Error('Feishu returned a message outside the source chat')
-  return { status: message.deleted ? 'deleted' : 'available', message }
+  return { status: message.deleted ? 'deleted' : 'available', message: (await restoreFiles(commands, ref.chatId, [message]))[0]! }
 }
 function isoTime(value: string): string {
   try { return feishuTime(value) } catch { return value }

@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
-import { feishuRead, readFeishu, feishuReferences, readFeishuLink } from '../src/sources/feishu-read.ts'
+import { feishuRead, readFeishu, feishuReferences, readFeishuLink, restoreFeishuTriggerFiles } from '../src/sources/feishu-read.ts'
+import { feishuTrigger, historyText } from '../src/sources/feishu-trigger.ts'
+import { triggerMessage } from '../src/executor/dsh.ts'
 import type { FeishuRef } from '../src/sources/feishu-read.ts'
 const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
 const event: FeishuRef = { triggerId: 'source', chatId: 'oc_chat', messageId: 'om_source' }
@@ -89,4 +91,39 @@ it('reads the chat around a message by time: five before it, the message and fiv
   const earlier = await feishuRead(commands, ref, 'feishu/source/around/older', 20)
   expect('messages' in earlier && earlier.messages.map(message => message.id)).toEqual(['om_-7', 'om_-6'])
   expect(params(4)).toMatchObject({ page_token: 'older', page_size: 10 })
+})
+
+const rawPost = JSON.stringify({ title: '', content: [[{ tag: 'text', text: 'calculate attached file' }]],
+  files: [{ file_key: 'file_v3_attachment', file_name: 'moke.txt', is_folder: false }] })
+it('restores rich post files omitted by CLI in single and paginated thread reads without downloading', async () => {
+  const post = { ...message, msg_type: 'post', content: 'calculate attached file' }
+  const lark = vi.spyOn(commands, 'lark').mockResolvedValueOnce({ items: [source] })
+    .mockResolvedValueOnce({ messages: [post] }).mockResolvedValueOnce({ items: [{ ...source, message_id: 'om_root', body: { content: rawPost } }] })
+  const one = await feishuRead(commands, event, 'feishu/source/root', 20)
+  expect('message' in one && one.message?.text).toContain('file_v3_attachment')
+  expect('message' in one && one.message?.text).toContain('moke.txt')
+  lark.mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({ thread_id: 'omt_thread', messages: [post], has_more: true, page_token: 'next' })
+    .mockResolvedValueOnce({ items: [{ ...source, message_id: 'om_root', body: { content: rawPost } }] })
+  const page = await feishuRead(commands, event, 'feishu/source/thread', 20)
+  expect(page).toMatchObject({ messages: [{ text: expect.stringContaining('file_v3_attachment') }], next_resource: 'feishu/source/thread/next' })
+  expect(lark.mock.calls.filter(([args]) => args.includes('+messages-resources-download'))).toHaveLength(0)
+})
+it('rejects missing and cross-chat raw attachment metadata instead of silently claiming no attachments', async () => {
+  const post = { ...message, msg_type: 'post' }
+  const lark = vi.spyOn(commands, 'lark')
+  for (const items of [[], [{ ...source, message_id: 'om_root', chat_id: 'oc_elsewhere', body: { content: rawPost } }]]) {
+    lark.mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({ messages: [post] }).mockResolvedValueOnce({ items })
+    await expect(feishuRead(commands, event, 'feishu/source/root', 20)).rejects.toThrow(/metadata/)
+  }
+})
+it('keeps live attachment metadata from main intake through worker trigger delivery, and history text plus files', async () => {
+  const trigger = feishuTrigger({ message_id: 'om_source', chat_id: 'oc_chat', chat_type: 'p2p', sender_id: 'ou_user',
+    sender_type: 'user', content: 'calculate attached file', create_time: '1795597038624' }, 'ou_bot', 'cli_bot')!
+  vi.spyOn(commands, 'lark').mockResolvedValue({ items: [{ ...source, body: { content: rawPost } }] })
+  const restored = await restoreFeishuTriggerFiles(commands, trigger)
+  expect(restored.text).toContain('file_v3_attachment')
+  expect(triggerMessage(restored, {}).text).toContain('moke.txt')
+  expect(historyText({ ...source, create_time: '1795597038624', sender: { id: 'ou_user', sender_type: 'user' },
+    body: { content: JSON.stringify({ text: 'calculate', files: [{ file_key: 'file_v3_attachment', file_name: 'moke.txt' }] }) } }))
+    .toContain('file_v3_attachment')
 })
