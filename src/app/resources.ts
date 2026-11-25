@@ -1,5 +1,7 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { join } from 'node:path'
+import { materializeFeishuFiles } from '../sources/feishu-file.ts'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
@@ -213,7 +215,19 @@ const ROUTES: readonly Route[] = [
     const ref = feishuRef(source)
     if (!ref) throw new Error('A Feishu source trigger is required')
     const commands = read.host.commands.withSignal(read.signal)
-    return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
+    return sourcePage(read, 'feishu', async () => {
+      const page = await feishuRead(commands, ref, read.resource, read.host.feishuPageSize())
+      // Only an authorized worker read materializes files. Main/assessment reads remain read-only;
+      // the source reader has already checked chat/thread membership before any resource download.
+      if (!read.ticketId) return page
+      const directory = join(commands.deployment.stateDir, 'feishu-files', read.ticketId)
+      if ('messages' in page) {
+        const messages = []
+        for (const message of page.messages) messages.push(await materializeFeishuFiles(commands, message, directory))
+        return { ...page, messages }
+      }
+      return { ...page, message: page.message ? await materializeFeishuFiles(commands, page.message, directory) : null }
+    })
   }],
   ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
   ['trigger/', async read => {

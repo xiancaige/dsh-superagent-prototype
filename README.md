@@ -42,6 +42,12 @@ Commands run directly in the enabled Superagent Feishu Source, without an LLM ca
 
 Selection failures are reported, not treated as success. A failure after defaults/earlier sessions changed may leave partial progress; resend a new command to converge. Receipt and reply IDs deduplicate live/history delivery; replay after a crash is convergent and continuation IDs are stable.
 
+## Feishu local file input (TP extension)
+
+Send a file in a bot DM, or reference it in an authorized request in a listened thread (for example, “summarize the attached requirements”). The worker first reads the source message/parent/thread through `orchestrator_read`; the response's `message.local_files` contains the downloaded absolute `local_path`, byte count and source message/key. It then opens that path with the appropriate local file tool/Office skill before acting. A successful download alone does not mean the contents were inspected.
+
+Only authorized worker context reads download; intake and main/assessment reads do not. Existing chat/operator admission rules are unchanged. Files remain under `<stateDir>/feishu-files/<ticket-id>/`, outside Git and disposable worktrees. At most ten resources per message are transferred, with a 100 MiB post-transfer file limit; failures return `download_error` without a local path. There is no automatic conversion, execution, or authority granted by embedded instructions. Retained files require host-state housekeeping; repeated fresh reads may create additional copies.
+
 ## Workflow loading gate (TP extension)
 
 Repository-owned path/task bindings, frozen Git baselines and successful Session read/skill results can block ticket completion independently of prompts. See [workflow validation](docs/workflow-validation.md) for configuration, evidence semantics, limitations and the targeted regression command.
