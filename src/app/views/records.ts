@@ -1,6 +1,6 @@
 /** Shared view projections for triggers, tickets, threads, decisions, and channel links. */
 import { z } from 'zod'
-import { canRetry, followupOwners, latestAssignment, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
+import { canRetry, followupOwners, hasActiveModelFailure, latestAssignment, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
   type DecisionKind, type Thread, type ThreadFacts, type Ticket, type TicketStage, type Trigger } from '../../core/index.ts'
 import { allowedSender, listedBot } from '../../policy.ts'
 import type { ChannelLink, Localized } from '../../sources/kind.ts'
@@ -128,7 +128,7 @@ export function ticketSummary(ticket: Ticket) {
       ? workerSessionId(ticket.id) : '',
     directory: attribute(ticket.execution?.directory),
     ...(latestReport(ticket)?.completion ? { completion: latestReport(ticket)!.completion, acceptancePending: latestReport(ticket)!.completion === 'implementation' } : {}),
-    ...(latestAssignment(ticket)?.modelFailure ? { modelFailure: latestAssignment(ticket)!.modelFailure } : {}),
+    ...(hasActiveModelFailure(latestAssignment(ticket)) ? { modelFailure: latestAssignment(ticket)!.modelFailure } : {}),
     summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }
 }

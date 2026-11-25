@@ -232,8 +232,8 @@ export interface Assignment {
   endedAt?: string
   endedReason?: string
   report?: { state: ReportState; summary: string; at: string; completion?: 'implementation' | 'accepted' }
-  /** Terminal model-turn failure; host never multiplies the model's own retry budget. */
-  modelFailure?: { at: string; error: string; hostResumeBudget: 0 }
+  /** Last terminal model-turn failure, kept for diagnostics after recoveredAt; host never adds transport retries. */
+  modelFailure?: { at: string; error: string; hostResumeBudget: 0; recoveredAt?: string }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -400,6 +400,16 @@ export function reached(ticket: Ticket, trigger: Trigger, thread: (key: string) 
     const current = thread(threadKey(ref))
     return current?.subscriptions.includes(ticket.id) === true && (context || !current.context?.includes(ticket.id))
   }) || (input && (context || !trigger.threads.every(ref => thread(threadKey(ref))?.context?.includes(ticket.id))))
+}
+/**
+ * Historical failures remain diagnostic, not permanent advance/restart vetoes. A later non-failed report
+ * also proves recovery for records written before recoveredAt existed. Delivery or idle alone does not.
+ */
+export function hasActiveModelFailure(assignment: Assignment | undefined): boolean {
+  const failure = assignment?.modelFailure
+  if (!failure || failure.recoveredAt) return false
+  const report = assignment?.report
+  return !(report && report.state !== 'failed' && report.at > failure.at)
 }
 export const latestAssignment = (ticket: Ticket): Assignment | undefined => ticket.assignments.at(-1)
 /** The latest report any of a ticket's Assignments made, which is what the ticket last said. */

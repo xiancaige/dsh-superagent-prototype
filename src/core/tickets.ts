@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { assertTicketValidated } from './validation.ts'
 import { UserError, type UserErrorCode } from './errors.ts'
-import { ENVIRONMENT_BLOCK, blockedForEnvironment, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey,
+import { ENVIRONMENT_BLOCK, blockedForEnvironment, hasActiveModelFailure, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey,
   waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, OrchestratorDecision, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
@@ -57,7 +57,7 @@ export function advanceRefusalCode(ticket: Ticket): UserErrorCode | undefined {
   if (!liveTicket(ticket)) return 'ticketEnded'
   if (blockedForEnvironment(ticket)) return 'advanceEnvironmentBlocked'
   const latest = latestAssignment(ticket)
-  if (latest?.modelFailure?.hostResumeBudget === 0) return 'advanceModelFailure'
+  if (hasActiveModelFailure(latest)) return 'advanceModelFailure'
   if (ticket.designApproval?.required && !ticket.designApproval.approval && latest?.state === 'pending') return 'advanceDesignBlocked'
   if (latest?.report?.state === 'ready' && latest.report.completion !== 'implementation') return 'advanceAlreadyReady'
   const progress = latestAdvanceProgress(ticket)

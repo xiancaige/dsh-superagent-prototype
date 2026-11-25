@@ -83,7 +83,7 @@ const STALLED_FOLLOWUP_NOTE = `${FOLLOWUP_NOTE} When a listed ticket is stalled 
 /** Unanswered human follow-up trigger summarized inside a failed/blocked worker report relay. */
 export interface UnansweredTrigger { trigger_id: string; preview: string }
 const isTicketStalledForFollowup = (ticket: Ticket): boolean =>
-  blockedForEnvironment(ticket) || !!ticket.delivery || latestAssignment(ticket)?.modelFailure?.hostResumeBudget === 0 || !!advanceBlockedCode(ticket)
+  blockedForEnvironment(ticket) || !!ticket.delivery || !!advanceBlockedCode(ticket)
 /**
  * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open

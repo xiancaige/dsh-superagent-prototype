@@ -3,7 +3,7 @@ import { key } from './ids.ts'
 import { assertTicketValidated } from './validation.ts'
 import { assertTicketDesignApproved } from './design.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
+import { hasActiveModelFailure, latestAssignment, liveTicket, runningAssignment } from './model.ts'
 import type { ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
@@ -92,12 +92,12 @@ export class Assignments extends EnginePart {
     const report = running.report
     const busy = !!running.deliveredAt && !!report && running.deliveredAt >= report.at
     const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
-    if (running.modelFailure?.hostResumeBudget === 0
-      && (!running.deliveredAt || running.deliveredAt <= running.modelFailure.at)) {
+    if (hasActiveModelFailure(running)
+      && (!running.deliveredAt || running.deliveredAt <= running.modelFailure!.at)) {
       // Persisted before the async error report: a crash in that gap must not rebill a
       // model turn, nor may equal millisecond timestamps replenish the budget.
       if (report?.state !== 'failed') {
-        const summary = `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${running.modelFailure.error}`
+        const summary = `Model turn failed; host automatic resume budget 0. Explicit human retry required. ${running.modelFailure!.error}`
         this.report(ticketId, { state: 'failed', summary })
         this.emit('assignment.failed', { ticketId, assignmentId: running.id, summary, modelFailure: true })
       }
@@ -149,6 +149,9 @@ export class Assignments extends EnginePart {
     else delete ticket.attention
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
+    // Reaching a new non-failed report proves the worker has recovered, even within the same millisecond.
+    // Keep the failure for diagnostics; neither delivery nor a bare idle event replenishes retries.
+    if (assignment.modelFailure && report.state !== 'failed') assignment.modelFailure.recoveredAt ??= at
     assignment.report = { state: report.state, summary: report.summary, at,
       ...(report.completion ? { completion: report.completion } : {}) }
     ticket.updatedAt = at
