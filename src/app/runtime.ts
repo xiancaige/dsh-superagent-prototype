@@ -42,6 +42,7 @@ import { Mirror } from './mirror.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { FeishuProgressSync } from './progress-sync.ts'
+import { evaluateLockMonitor, LockOwnerMonitor, type LockMonitorReport } from './lock-monitor.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
@@ -168,6 +169,7 @@ export class Runtime extends Service implements SourceHost {
   readonly engine: Engine
   readonly passes: Passes
   readonly progressSync: FeishuProgressSync
+  readonly lockMonitor: LockOwnerMonitor
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
@@ -374,6 +376,16 @@ export class Runtime extends Service implements SourceHost {
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, mirror, paused: () => this.paused() })
       this.progressSync = new FeishuProgressSync({ context: ctx, store, sources, outbox, mirror,
         configured: () => setup.configured(), paused: () => this.paused(), closing: () => this.closing() })
+      this.lockMonitor = new LockOwnerMonitor({
+        context: ctx, store, sessions,
+        health: board.claim('lockMonitor', { state: 'ready', detail: 'No lock held' }),
+        stateDir: machine.stateDir,
+        sourceRoot: () => runtime.sourceRoot(),
+        webPort: () => ctx.webServer?.port,
+        envBroker: () => runtime.environmentHosted?.broker,
+        sourceLock: () => runtime.sourceLockStatus(),
+        configured: () => setup.configured(), paused: () => this.paused(), closing: () => this.closing(),
+      })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       // Phase 2 C: the environment is composed before any editor recovery, which borrows its one lock.
@@ -484,6 +496,7 @@ export class Runtime extends Service implements SourceHost {
         notifyAdvanceBlocked,
         sourceLock: () => runtime.sourceLockStatus(),
         unlockSourceLock: input => runtime.unlockSourceLock(input),
+        lockMonitor: () => runtime.lockMonitorStatus(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
@@ -543,6 +556,7 @@ export class Runtime extends Service implements SourceHost {
     this.passes.start()
     this.effects.start()
     this.progressSync.start()
+    this.lockMonitor.start()
     // Phase 2 C: a restarted host keeps the ticket that holds the environment: its persisted lease is
     // re-taken by this process and beaten, so waiting, idling and restarting never free it.
     this.environmentHosted?.broker.wake()
@@ -622,6 +636,22 @@ export class Runtime extends Service implements SourceHost {
     if (retriedTickets.length) this.passes.request()
     return { ...result, retriedTickets }
   }
+  /** Inspects current TP environment and source-checkout locks and evaluates lock-holding ticket liveness. */
+  lockMonitorStatus(): Promise<LockMonitorReport> {
+    const broker = this.environmentHosted?.broker
+    const envRecord = broker?.read()
+    const envLive = broker ? broker.liveRecord(envRecord) : false
+    return evaluateLockMonitor({
+      envRecord,
+      envLive,
+      ...(broker ? { envFile: broker.file } : {}),
+      sourceLock: this.sourceLockStatus(),
+      store: this.store,
+      context: this.ctx,
+      effects: this.effects,
+      modelRetry: id => this.sessions.modelRetry(id),
+    })
+  }
   /** Stop exactly the TP editor this deployment started for a ticket, before its environment goes elsewhere. */
   private async stopTicketEditor(ticketId: string, environment: TpEditorEnvironment): Promise<void> {
     await this.editorRecovery?.cleanup(ticketId, environment)
@@ -638,6 +668,7 @@ export class Runtime extends Service implements SourceHost {
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog(),
       environment: () => runtime.environmentView(),
+      lockMonitor: () => runtime.lockMonitorStatus(),
       sourceLock: () => runtime.sourceLockStatus(),
       unlockSourceLock: input => runtime.unlockSourceLock(input) }
   }
@@ -646,6 +677,7 @@ export class Runtime extends Service implements SourceHost {
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     await this.progressSync.stop()
+    await this.lockMonitor.stop()
     // The environment lease outlives the host: the heartbeat stops, the record stays for the next start.
     if (this.environmentTimer) { clearInterval(this.environmentTimer); this.environmentTimer = undefined }
     this.environmentHosted?.broker.halt()

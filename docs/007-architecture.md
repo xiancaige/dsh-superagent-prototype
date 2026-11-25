@@ -405,6 +405,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-model-card.ts` | The Feishu card and bot-menu projections of the TP `/model` command, answered within the CLI's three-second callback window |
 | `src/app/feishu-commands.ts` | The TP operator commands of the Feishu Source (`/model`, `/todo`, `/unlock`, `/help`): who may run one, and the receipt that keeps a replayed command from running twice |
 | `src/app/source-lock.ts` | Inspection, dead-PID stale-lock reaping, force-unlock, and blocked-ticket recovery for `tp-source-operation.lock` |
+| `src/app/lock-monitor.ts` | Periodic script-backed (`scripts/check-lock-owner.mjs`) liveness monitor for tickets holding `tp-environment.lock` or `tp-source-operation.lock` |
 | `src/app/ticket-analysis.ts` | The ticket-analysis effect the orchestrator calls directly when a ticket ends, so reflection never waits on a broadcast listener |
 | `src/sources/wecom.ts` | The WeCom kind and plugin entry, exported as `./wecom-watch`: the chats, the Policy, the Channel and the long connection |
 | `src/sources/wecom-trigger.ts` | WeCom callbacks as Triggers, and the chat, topic and reply addresses they use |
@@ -508,6 +509,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/route.spec.ts` | The panel's typed routes: parsing, the settings group opened last, and the pages each route names |
 | `tests/feishu-commands.spec.ts` | The TP Feishu operator commands: admission, the model selection they apply, and the receipts that deduplicate a replayed callback |
 | `tests/source-lock.spec.ts` | Source checkout lock inspection, dead-PID reaping, force-unlock safety, blocked-ticket retry, HTTP routes, main-Session tool, and Feishu `/unlock` command |
+| `tests/lock-monitor.spec.ts` | Lock-owner liveness evaluation, periodic script-backed `LockOwnerMonitor`, `scripts/check-lock-owner.mjs` CLI/HTTP/SQLite checks, `environment` resource, and `GET /orchestrator/api/lock-monitor` |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/environment-config.spec.ts` | The rollout's `environment` section: absent or disabled stays `recoveryEnabled: false` (no environment, `held:false`, `noEnvironment`), an enabled section reaches the plugin config through a valid YAML block, and a wrong path, port or key fails loudly in `setup-superagent.mjs` instead of disabling silently |
@@ -639,6 +641,7 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
+| `environment` | Current TP environment and source-checkout locks and lock-holding ticket liveness |
 | `feishu/<trigger id>/…`, `github/…` | Original Source records, described in the Source skills |
 
 Ticket Threads are marked `context` for context-only follows and `bound` for Source bindings. Assignment pages are newest first and include report previews. Continue lists with `next_offset`. `/input/<id>` accepts an Input's name or id. `settings` includes small blocks in full and summarizes Policy and Source blocks.
@@ -665,6 +668,7 @@ These messages are steered into the main Session's turn:
 | `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop work |
 | `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
 | `worker_attention` | Ticket card carrying the question |
+| `lock_owner_alert` | Dead or stalled lock-holding ticket alert from `LockOwnerMonitor`, with lock holder diagnostics and `read: "environment"` |
 
 Other notices are injected without waking the main Session: `ticket_ended`, `settings_saved`, prompt saves, Trigger requeues, dropped Subscriptions and context follows. A settings notice names the block, changed paths and `read: settings/<block>`. The main Session receives no redundant notice for a save, requeue, unsubscribe or attach it performed itself.
 

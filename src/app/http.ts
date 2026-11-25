@@ -33,6 +33,7 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import type { EnvironmentExclusivityView } from './environment-exclusive.ts'
+import type { LockMonitorReport } from './lock-monitor.ts'
 import type { ForceUnlockResponse, SourceLockStatus } from './source-lock.ts'
 import { retryFinalize, type FinalizeRetryHost } from './finalize-retry.ts'
 
@@ -67,6 +68,8 @@ export interface HttpHost extends FinalizeRetryHost {
   extractTicketExperience(ticketId: string, requestId: string): Promise<import('./ticket-analysis.ts').TicketAnalysisResult>
   /** Phase 2 C: the shared TP environment's holder, heartbeat and latest release, as a person sees it. */
   environment(): EnvironmentExclusivityView
+  /** Live lock-holding ticket liveness evaluation for tp-environment.lock and tp-source-operation.lock. */
+  lockMonitor?(): Promise<LockMonitorReport>
   /** Shared source checkout lock status (`tp-source-operation.lock`). */
   sourceLock?(): SourceLockStatus
   /** Force-unlock the shared source checkout lock and optionally retry tickets blocked by it. */
@@ -272,6 +275,9 @@ function routes(runtime: HttpHost): Routes {
       return runtime.engine.deliverTicket(ticket(params.id), input.assignmentId, input.level, input.requestId)
     },
     'GET environment': () => runtime.environment(),
+    'GET lock-monitor': () => runtime.lockMonitor ? runtime.lockMonitor() : {
+      checkedAt: new Date().toISOString(), status: 'unlocked', locked: false, locks: [], issues: [],
+    },
     'GET source-lock': () => runtime.sourceLock ? runtime.sourceLock() : { available: false, locked: false },
     'POST source-lock/unlock': async ({ body }) => {
       if (!runtime.unlockSourceLock) throw new RouteError(404, 'Source lock management is unavailable')

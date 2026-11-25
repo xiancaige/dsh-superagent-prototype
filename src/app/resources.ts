@@ -16,6 +16,7 @@ import type { Commands } from '../infra/commands.ts'
 import type { PromptVersion, Prompts } from './prompts.ts'
 import type { Sessions } from './sessions.ts'
 import type { Settings } from './settings.ts'
+import type { LockMonitorReport } from './lock-monitor.ts'
 import { KV } from '../kv.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
@@ -51,6 +52,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'prompt-preview/<id>', holds: 'a composed prompt that orchestrator_prompts_save previewed' },
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
+  { name: 'environment', holds: 'current TP environment lock (tp-environment.lock), source checkout lock (tp-source-operation.lock), and lock-holding ticket liveness status' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
 ]
@@ -73,6 +75,7 @@ export interface ResourceHost {
 export interface MainResourceHost extends ResourceHost {
   readonly sessions: Pick<Sessions, 'status' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block'>
+  readonly lockMonitor?: () => Promise<LockMonitorReport>
 }
 interface Read {
   host: ResourceHost; resource: string; rest: string; offset: number; limit?: number
@@ -199,6 +202,11 @@ const ROUTES: readonly Route[] = [
     const models = (await main(read).context.sessionController.modelCatalog()).groups.find(group => group.id === read.rest)?.models
     if (!models) throw new Error('Unknown model provider')
     return list(read, (offset, count) => models.slice(offset, offset + count))
+  }],
+  ['environment', async read => {
+    const host = main(read)
+    return host.lockMonitor ? await host.lockMonitor()
+      : { checkedAt: new Date().toISOString(), status: 'unlocked', locked: false, locks: [], issues: [] }
   }],
   ['feishu/', async read => {
     const source = trigger(read.host, read.rest.split('/')[0]!, read.ticketId)

@@ -364,6 +364,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'PUT tickets/:id/delivery': { body: true, answer: () => refuse(400, 'No simulation target configured in this panel fixture') },
   'POST tickets/:id/delivery': { body: true, answer: () => ({ refused: true as const, reasons: ['No operator grant/target configured'] }) },
   'GET environment': { answer: () => ({ held: false }) },
+  'GET lock-monitor': { answer: () => ({ checkedAt: new Date().toISOString(), status: 'unlocked', locked: false, locks: [], issues: [] }) },
   'GET source-lock': { answer: () => server.sourceLock },
   'POST source-lock/unlock': { body: true, answer: ({ body }) => {
     const previous = server.sourceLock

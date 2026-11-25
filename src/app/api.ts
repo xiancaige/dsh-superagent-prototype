@@ -23,6 +23,8 @@ export interface Api {
   'GET state': { response: StateView }
   /** Phase 2 C: the shared TP environment's holder, its heartbeat, and the last release. */
   'GET environment': { response: import('./environment-exclusive.ts').EnvironmentExclusivityView }
+  /** Lock-holding ticket liveness monitor report (tp-environment.lock & tp-source-operation.lock). */
+  'GET lock-monitor': { response: import('./lock-monitor.ts').LockMonitorReport }
   /** Shared source checkout mutex (`tp-source-operation.lock`) status and force-unlock recovery. */
   'GET source-lock': { response: import('./source-lock.ts').SourceLockStatus }
   'POST source-lock/unlock': { body: { force?: boolean; retryBlocked?: boolean }; response: import('./source-lock.ts').ForceUnlockResponse }

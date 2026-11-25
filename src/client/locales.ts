@@ -47,6 +47,7 @@ const TEXT = {
   'health.reply': ['发往渠道的消息', 'Messages to Channels'],
   'health.worker': ['执行器事件处理', 'Executor event handling'],
   'health.evals': ['未完成的评估', 'Unavailable Evals'],
+  'health.lockMonitor': ['持锁工单监控', 'Lock-owner monitor'],
   none: ['暂无。', 'None.'],
   openSession: ['打开 Session', 'Open Session'],
   stop: ['停止', 'Stop'],

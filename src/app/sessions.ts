@@ -7,7 +7,7 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, key, latestReport, liveTicket, waitsForPerson, type Ticket } from '../core/index.ts'
+import { advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, key, latestReport, liveTicket, ticketStage, waitsForPerson, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -127,6 +127,9 @@ function supervisorReports(messages: readonly UserMessage[]): { inject: boolean;
               unansweredTicketIds.push(parsed.ticket.ticket_id)
             }
           }
+        } else if (parsed.kind === 'lock_owner_alert') {
+          inject = true
+          if (typeof parsed.ticket?.ticket_id === 'string') ticketIds.push(parsed.ticket.ticket_id)
         } else if (parsed.kind === 'supervisor_nudge') {
           inject = true
         }
@@ -447,7 +450,8 @@ export class Sessions {
     const recordAction = (toolName: string, rawArgs: unknown, output: unknown): void => {
       if (!master) return
       const args = (rawArgs ?? {}) as Record<string, unknown>
-      if ((toolName === 'orchestrator_ticket_advance' || toolName === 'orchestrator_ticket_retry') && typeof args.ticket_id === 'string') {
+      if ((toolName === 'orchestrator_ticket_advance' || toolName === 'orchestrator_ticket_retry'
+        || toolName === 'orchestrator_ticket_request_status') && typeof args.ticket_id === 'string') {
         resolvedTickets.add(args.ticket_id)
       } else if (toolName === 'orchestrator_reply') {
         const purpose = args.purpose
@@ -533,7 +537,7 @@ export class Sessions {
             const state = report?.state
             if (state === 'ready' && report?.completion === 'implementation') return true
             if (answeredOnlyTickets.has(id)) return false
-            return state === 'waiting' || state === 'blocked' || state === 'failed'
+            return state === 'waiting' || state === 'blocked' || state === 'failed' || ticketStage(current).stage === 'idle'
           })
           if (!pending.length) {
             const unansweredPending = [...unansweredTickets].filter(id => {

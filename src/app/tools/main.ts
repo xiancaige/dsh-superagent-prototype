@@ -13,6 +13,7 @@ import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
 import type { ForceUnlockResponse, SourceLockStatus } from '../source-lock.ts'
+import type { LockMonitorReport } from '../lock-monitor.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 const RoutingNoteSchema = z.string().trim()
@@ -36,6 +37,8 @@ export interface MainToolsHost {
   sourceLock?(): SourceLockStatus
   /** Unlocks a stale or operator-authorized source checkout lock and optionally retries lock-blocked tickets. */
   unlockSourceLock?(input: { force?: boolean; retryBlocked?: boolean }): ForceUnlockResponse
+  /** Evaluates current environment & source locks and lock-holding ticket liveness. */
+  lockMonitor?(): Promise<LockMonitorReport>
   /** Sends an idempotent IM notice when `orchestrator_ticket_advance` is refused by a safety gate. */
   notifyAdvanceBlocked?(ticket: Ticket, code: AdvanceBlockCode): boolean
 }
@@ -188,7 +191,8 @@ function routeTool(host: MainToolsHost): Tool {
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
-  const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
+  const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings,
+    ...(host.lockMonitor ? { lockMonitor: host.lockMonitor } : {}) }
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
