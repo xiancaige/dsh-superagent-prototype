@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { blockedForEnvironment, canAdvanceTicket, followupOwners, key, latestAssignment, latestReport, liveTicket, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
+import { USER_ERRORS, advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, followupOwners, key, latestAssignment, latestReport, liveTicket, type AdvanceBlockCode, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { IM_WORDS, imSummary } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -83,7 +83,7 @@ const STALLED_FOLLOWUP_NOTE = `${FOLLOWUP_NOTE} When a listed ticket is stalled 
 /** Unanswered human follow-up trigger summarized inside a failed/blocked worker report relay. */
 export interface UnansweredTrigger { trigger_id: string; preview: string }
 const isTicketStalledForFollowup = (ticket: Ticket): boolean =>
-  blockedForEnvironment(ticket) || !!ticket.delivery || latestAssignment(ticket)?.modelFailure?.hostResumeBudget === 0
+  blockedForEnvironment(ticket) || !!ticket.delivery || latestAssignment(ticket)?.modelFailure?.hostResumeBudget === 0 || !!advanceBlockedCode(ticket)
 /**
  * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
@@ -121,9 +121,11 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const completion = state === 'ready' ? latestReport(ticket)?.completion : undefined
   const advanceable = canAdvanceTicket(ticket)
+  const blocked = advanceable ? undefined : advanceBlockedCode(ticket)
   const unanswered = unansweredTriggers?.length ? { unanswered_triggers: unansweredTriggers.slice(-5) } : {}
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state,
-    ...completion ? { completion } : {}, ...advanceable ? { can_advance: true } : {},
+    ...completion ? { completion } : {},
+    ...advanceable ? { can_advance: true } : blocked ? { advance_blocked: blocked } : {},
     ...replyTo ? { answer_to: replyTo } : {}, ...unanswered, ...summary, read: `ticket/${ticket.id}/result` }
   return { id: `report:${id}`, text: JSON.stringify(report) }
 }
@@ -138,9 +140,10 @@ export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' |
   const asked = report.question ? ticket.attention : undefined
   if (asked) {
     const advanceable = canAdvanceTicket(ticket)
+    const blocked = advanceable ? undefined : advanceBlockedCode(ticket)
     return { id: `attention:${ticket.id}:${asked.id}`,
       text: JSON.stringify({ kind: 'worker_attention', ticket: brief(ticket), state: report.state,
-        ...advanceable ? { can_advance: true } : {}, read: `ticket/${ticket.id}/result` }) }
+        ...advanceable ? { can_advance: true } : blocked ? { advance_blocked: blocked } : {}, read: `ticket/${ticket.id}/result` }) }
   }
   if (report.state === 'progress' && !report.answers) return undefined
   return resultRelay(ticket, report.state, report.summary, report.answers, unansweredTriggers)
@@ -237,6 +240,52 @@ export function ticketFailedNotices(ticket: Ticket, request: string, summary: st
   const text = imSummary(raw, IM_WORDS - 5, '…')
   return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
     id: key('ticket-failed', ticket.id, options.assignmentId ?? '', channel.source, JSON.stringify(channel.address)),
+    channel, text, kind: 'notice', ticketId: ticket.id,
+  }))
+}
+/**
+ * Builds idempotent IM notices when automatic ticket advancement is prohibited by a safety gate
+ * (`advanceEnvironmentBlocked`, `advanceModelFailure`, `advanceDesignBlocked`, or `advanceStalled`),
+ * preserving the prohibition while ensuring operators learn why the ticket stopped advancing.
+ */
+export function advanceBlockedNotices(ticket: Ticket, request: string, code: AdvanceBlockCode,
+  options: { assignmentId?: string; marker?: string } = {}): OutboundMessage[] {
+  if (code === 'advanceEnvironmentBlocked') {
+    const reason = ticket.environmentBlock ?? ticket.validation?.blocked ?? USER_ERRORS.advanceEnvironmentBlocked[1]
+    return environmentLockNotices(ticket, request, reason, options.assignmentId ? { assignmentId: options.assignmentId } : {})
+  }
+  const assignmentId = options.assignmentId ?? latestAssignment(ticket)?.id ?? ''
+  const report = latestReport(ticket)
+  const marker = options.marker ?? (
+    code === 'advanceModelFailure' ? (report?.at ?? latestAssignment(ticket)?.modelFailure?.at ?? '')
+      : code === 'advanceDesignBlocked' ? (ticket.designApproval?.revision ?? '')
+      : (ticket.attention?.id ?? report?.at ?? String(ticket.orchestratorDecisions?.length ?? 0))
+  )
+  const chinese = chineseRequest(request, ticket.title)
+  const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 18, '…')
+  let detailZh: string
+  let detailEn: string
+  if (code === 'advanceModelFailure') {
+    detailZh = '存在终止性模型失败标记（自动恢复额度为 0），已禁止继续自动推进，需要人工显式重试或介入'
+    detailEn = 'terminal model failure (resume budget 0); automatic advance blocked, explicit human retry required'
+  } else if (code === 'advanceDesignBlocked') {
+    detailZh = '等待必需的人工设计确认，已禁止继续自动推进'
+    detailEn = 'waiting for required human design approval; automatic advance blocked'
+  } else {
+    const repeatedQuestion = !!ticket.attention?.question
+    detailZh = repeatedQuestion
+      ? '重复同一未决问题且未见新进展，已禁止继续自动推进，请人工确认'
+      : '连续自动推进未见新进展，已禁止继续自动推进，请人工介入或调整'
+    detailEn = repeatedQuestion
+      ? 'repeated same open question with no progress; automatic advance stopped, human confirmation required'
+      : 'consecutive advances made no progress; automatic advance stopped, human action required'
+  }
+  const raw = chinese
+    ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）已停止自动推进：${detailZh}。`
+    : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) stopped advancing: ${detailEn}.`
+  const text = imSummary(raw, IM_WORDS - 5, '…')
+  return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
+    id: key('advance-blocked', ticket.id, code, assignmentId, marker, channel.source, JSON.stringify(channel.address)),
     channel, text, kind: 'notice', ticketId: ticket.id,
   }))
 }

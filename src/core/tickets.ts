@@ -67,6 +67,16 @@ export function advanceRefusalCode(ticket: Ticket): UserErrorCode | undefined {
   }
   return undefined
 }
+/** Active-ticket refusal codes where advancing is prohibited and human notification/intervention is required. */
+export type AdvanceBlockCode = 'advanceEnvironmentBlocked' | 'advanceModelFailure' | 'advanceDesignBlocked' | 'advanceStalled'
+/** True when `code` is an active-ticket advance prohibition (`advanceEnvironmentBlocked`, `advanceModelFailure`, `advanceDesignBlocked`, or `advanceStalled`). */
+export const isAdvanceBlockedCode = (code: unknown): code is AdvanceBlockCode =>
+  code === 'advanceEnvironmentBlocked' || code === 'advanceModelFailure' || code === 'advanceDesignBlocked' || code === 'advanceStalled'
+/** Returns the active-ticket advance prohibition code when `ticket` is blocked from advancing, or `undefined` otherwise. */
+export const advanceBlockedCode = (ticket: Ticket): AdvanceBlockCode | undefined => {
+  const code = advanceRefusalCode(ticket)
+  return isAdvanceBlockedCode(code) ? code : undefined
+}
 /** True when `advanceTicket` can currently push `ticket` forward within its existing Mandate. */
 export const canAdvanceTicket = (ticket: Ticket): boolean => advanceRefusalCode(ticket) === undefined
 

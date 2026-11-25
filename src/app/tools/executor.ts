@@ -1,6 +1,6 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { DELIVERY_LEVELS, liveTicket, runningAssignment as activeAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { DELIVERY_LEVELS, advanceBlockedCode, liveTicket, runningAssignment as activeAssignment, type AdvanceBlockCode, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { unrespondedHumanFollowups, unansweredHumanTriggers } from '../../executor/dsh.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
@@ -25,6 +25,8 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
   /** Sends an idempotent IM notice when a worker reports `blocked` on an environment/editor lock without `human_action`. */
   notifyBlockedLock?(ticket: Ticket, summary: string): boolean
+  /** Sends an idempotent IM notice when a reported state leaves the ticket prohibited from automatic advancement. */
+  notifyAdvanceBlocked?(ticket: Ticket, code: AdvanceBlockCode): boolean
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
@@ -162,19 +164,25 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
-          const unansweredFailedOrBlocked = (args.state === 'blocked' || args.state === 'failed') && !args.reply_to_trigger_id && host.store.triggers
+          const blocked = advanceBlockedCode(updated)
+          const unansweredFailedOrBlocked = (args.state === 'blocked' || args.state === 'failed' || !!blocked)
+            && !args.reply_to_trigger_id && host.store.triggers
             ? unansweredHumanTriggers(updated, host.store.triggers) : undefined
           const relay = reportRelay(updated, report, unansweredFailedOrBlocked)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const lockNotified = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention
             ? host.notifyBlockedLock?.(updated, args.summary) ?? false : false
+          const advanceBlockedNotified = relay && blocked && !(blocked === 'advanceEnvironmentBlocked' && lockNotified)
+            ? host.notifyAdvanceBlocked?.(updated, blocked) ?? false : false
           const notification = relay ? 'orchestrator' : 'internal_only'
           const unanswered = notification === 'internal_only' && host.store.triggers
             ? unrespondedHumanFollowups(updated, host.store.triggers, activeAssignment(updated)?.idleAt ?? '') : []
           const missingAttentionWarning = args.state === 'blocked' && !args.human_action && !args.reply_to_trigger_id && !updated.attention && !lockNotified
             ? { warning: 'blocked without human_action or reply_to_trigger_id is NOT sent to IM/Feishu; pass human_action if human action is needed.' } : {}
           return {
-            reported: true, notification, ...(lockNotified ? { lock_notification: 'queued' } : {}), ...(updated.attention ? { attention: updated.attention } : {}),
+            reported: true, notification, ...(lockNotified ? { lock_notification: 'queued' } : {}),
+            ...(advanceBlockedNotified ? { advance_blocked_notification: 'queued' } : {}),
+            ...(updated.attention ? { attention: updated.attention } : {}),
             ...missingAttentionWarning,
             ...(unanswered.length ? {
               unanswered_human_triggers: unanswered.map(id => ({

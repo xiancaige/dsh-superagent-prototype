@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
+import { UserError, followupOwners, isAdvanceBlockedCode, key, reasonText, type AdvanceBlockCode, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type Ticket }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
@@ -36,6 +36,8 @@ export interface MainToolsHost {
   sourceLock?(): SourceLockStatus
   /** Unlocks a stale or operator-authorized source checkout lock and optionally retries lock-blocked tickets. */
   unlockSourceLock?(input: { force?: boolean; retryBlocked?: boolean }): ForceUnlockResponse
+  /** Sends an idempotent IM notice when `orchestrator_ticket_advance` is refused by a safety gate. */
+  notifyAdvanceBlocked?(ticket: Ticket, code: AdvanceBlockCode): boolean
 }
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
 function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: string; ticketId?: string | undefined }) {
@@ -227,14 +229,22 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         rationale: z.string().trim().min(1).max(2000).describe('Recorded decision process: what arose, options or evidence weighed, why it fits the mandate, and why human escalation is unnecessary.'),
       }).strict(),
       execute: async args => {
-        const result = host.quietly(() => host.engine.advanceTicket(args.ticket_id, { decision: args.decision, rationale: args.rationale }))
-        host.requestPass()
-        return {
-          advanced: true,
-          decision_id: result.decision.id,
-          ...(result.resolvedAttention ? { resolved_attention: result.resolvedAttention } : {}),
-          reason: 'Recorded orchestrator decision and queued delivery to worker',
-          ticket: ticketCard(result.ticket),
+        try {
+          const result = host.quietly(() => host.engine.advanceTicket(args.ticket_id, { decision: args.decision, rationale: args.rationale }))
+          host.requestPass()
+          return {
+            advanced: true,
+            decision_id: result.decision.id,
+            ...(result.resolvedAttention ? { resolved_attention: result.resolvedAttention } : {}),
+            reason: 'Recorded orchestrator decision and queued delivery to worker',
+            ticket: ticketCard(result.ticket),
+          }
+        } catch (error) {
+          if (error instanceof UserError && isAdvanceBlockedCode(error.code)) {
+            const ticket = host.store.tickets.get(args.ticket_id)
+            if (ticket && host.notifyAdvanceBlocked?.(ticket, error.code)) host.requestPass()
+          }
+          throw error
         }
       },
     }),

@@ -1,5 +1,5 @@
 /** Compact, bounded model-facing projections of triggers, tickets, threads, and decisions; full texts stay behind readable resources. */
-import { canAdvanceTicket, latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type OrchestratorDecision, type Thread, type Ticket,
+import { advanceBlockedCode, canAdvanceTicket, latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type OrchestratorDecision, type Thread, type Ticket,
   type TicketInput, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
@@ -73,9 +73,10 @@ export interface TicketThread { thread: string; context?: true; bound?: true }
 export function ticketDetails(ticket: Ticket, threads: TicketThread[], batch: readonly Trigger[], worker = false) {
   // Drop card preview because the latest report's preview is already shown on the first assignment entry.
   const { preview: _preview, ...card } = ticketCard(ticket)
+  const blocked = !worker ? advanceBlockedCode(ticket) : undefined
   return { ...card, trigger_id: ticket.origin.triggerId, ...batch.length ? { batch: batch.map(batchLine) } : {},
     ...worker ? {} : { decision_id: ticket.decisionId }, threads, directory: ticket.execution?.directory,
-    ...(!worker && canAdvanceTicket(ticket) ? { can_advance: true } : {}),
+    ...(!worker && canAdvanceTicket(ticket) ? { can_advance: true } : blocked ? { advance_blocked: blocked } : {}),
     scope: ticket.mandate.scope, requested_by: ticket.mandate.actor.id,
     assignments: newestPage(ticket.assignments, 0, ASSIGNMENTS, item => assignmentLine(ticket, item), `ticket/${ticket.id}/assignments`),
     inputs: newestPage(ticket.inputs, 0, INPUTS, input => inputLine(ticket, input, worker), `ticket/${ticket.id}/inputs`),

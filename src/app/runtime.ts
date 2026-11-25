@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, latestAssignment, liveTicket, reasonText, assertTicketValidated, type AdvanceBlockCode, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -34,7 +34,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
+import { advanceBlockedNotices, environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
 import { hasPendingMasterWork, notifyEvalTimeout, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -339,11 +339,20 @@ export class Runtime extends Service implements SourceHost {
         for (const message of messages) outbox.send(message)
         return messages.length > 0
       }
+      const notifyAdvanceBlocked = (blocked: Ticket, code: AdvanceBlockCode): boolean => {
+        if (!setup.configured()) return false
+        const request = store.triggers.get(blocked.origin.triggerId)?.text ?? blocked.title
+        const assignmentId = latestAssignment(blocked)?.id
+        const messages = advanceBlockedNotices(blocked, request, code, { ...(assignmentId ? { assignmentId } : {}) })
+        for (const message of messages) outbox.send(message)
+        return messages.length > 0
+      }
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger),
         notifyTicketFailure,
+        notifyAdvanceBlocked,
         unansweredTriggers: failed => unansweredHumanTriggers(failed, store.triggers) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
@@ -472,6 +481,7 @@ export class Runtime extends Service implements SourceHost {
           for (const message of messages) outbox.send(message)
           return messages.length > 0
         },
+        notifyAdvanceBlocked,
         sourceLock: () => runtime.sourceLockStatus(),
         unlockSourceLock: input => runtime.unlockSourceLock(input),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }

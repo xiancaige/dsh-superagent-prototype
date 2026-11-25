@@ -7,7 +7,7 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { blockedForEnvironment, canAdvanceTicket, key, latestReport, liveTicket, waitsForPerson, type Ticket } from '../core/index.ts'
+import { advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, key, latestReport, liveTicket, waitsForPerson, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -117,12 +117,12 @@ function supervisorReports(messages: readonly UserMessage[]): { inject: boolean;
     for (const block of message.content) {
       if (block.type !== 'text') continue
       try {
-        const parsed = JSON.parse(block.text) as { kind?: unknown; state?: unknown; unanswered_triggers?: unknown; ticket?: { ticket_id?: unknown } }
+        const parsed = JSON.parse(block.text) as { kind?: unknown; state?: unknown; advance_blocked?: unknown; unanswered_triggers?: unknown; ticket?: { ticket_id?: unknown } }
         if (parsed.kind === 'worker_report' || parsed.kind === 'worker_attention') {
           inject = true
           if (typeof parsed.ticket?.ticket_id === 'string') {
             ticketIds.push(parsed.ticket.ticket_id)
-            if ((parsed.state === 'failed' || parsed.state === 'blocked')
+            if ((parsed.state === 'failed' || parsed.state === 'blocked' || typeof parsed.advance_blocked === 'string')
               && Array.isArray(parsed.unanswered_triggers) && parsed.unanswered_triggers.length > 0) {
               unansweredTicketIds.push(parsed.ticket.ticket_id)
             }
@@ -540,7 +540,7 @@ export class Sessions {
               if (resolvedTickets.has(id) || answeredOnlyTickets.has(id)) return false
               const current = host.store.tickets.get(id)
               if (!current || !liveTicket(current)) return false
-              if (!waitsForPerson(current) && !current.delivery && !blockedForEnvironment(current)) return false
+              if (!waitsForPerson(current) && !current.delivery && !blockedForEnvironment(current) && !advanceBlockedCode(current)) return false
               return current.inputs.some(input => input.kind === 'trigger' && input.human && !input.context
                 && input.triggerId !== current.origin.triggerId
                 && !current.answered?.includes(input.triggerId) && !current.answers?.includes(input.triggerId))

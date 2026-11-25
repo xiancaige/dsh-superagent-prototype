@@ -6,6 +6,7 @@ import { blockedForEnvironment, latestAssignment, liveTicket, ticketOutcome, wai
 import type { ChannelRef, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
+import { advanceBlockedCode } from './tickets.ts'
 
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
@@ -93,7 +94,7 @@ export class Replies extends EnginePart {
       || ticket.origin.triggerIds.includes(trigger.id)
       || ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === trigger.id && !input.context)
     )
-    const stalled = !!ticket && liveTicket(ticket) && (waitsForPerson(ticket) || !!ticket.delivery || blockedForEnvironment(ticket))
+    const stalled = !!ticket && liveTicket(ticket) && (waitsForPerson(ticket) || !!ticket.delivery || blockedForEnvironment(ticket) || !!advanceBlockedCode(ticket))
     const fallbackReady = stalled && reachedForAnswer && !ticket.answered?.includes(trigger.id)
     const ready = !ticket || !trigger || ticket.answers?.includes(trigger.id) || fallbackReady
     if (request.purpose === 'answer' && !ready && !existing) throw new UserError('noAnswer')

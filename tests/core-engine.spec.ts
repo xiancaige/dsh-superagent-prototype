@@ -1087,6 +1087,18 @@ describe('replies', () => {
     const blockedId = accepted(h, '3', 't3').ticketId!
     h.tick(1); h.engine.report(blockedId, { state: 'blocked', summary: 'Missing lock' })
     expect(h.engine.reply({ purpose: 'answer', ticketId: blockedId, triggerId: '3', text: 'Blocked on lock.' })).toMatchObject({ status: 'pending', reused: false })
+    // A ticket prohibited from advancing in waiting or ready(implementation) state also permits purpose=answer once per unanswered trigger.
+    const stalledId = accepted(h, '4', 't4').ticketId!
+    h.tick(1); h.engine.report(stalledId, { state: 'waiting', summary: 'Step 1' })
+    h.tick(1); h.engine.advanceTicket(stalledId, { decision: 'Try 1', rationale: 'Push 1' })
+    h.tick(1); h.engine.report(stalledId, { state: 'waiting', summary: 'Step 2' })
+    h.tick(1); h.engine.advanceTicket(stalledId, { decision: 'Try 2', rationale: 'Push 2' })
+    h.tick(1); h.engine.report(stalledId, { state: 'ready', completion: 'implementation', summary: 'Still pending verification' })
+    expect(() => h.engine.advanceTicket(stalledId, { decision: 'Try 3', rationale: 'Push 3' })).toThrow(new UserError('advanceStalled'))
+    expect(h.engine.reply({ purpose: 'answer', ticketId: stalledId, triggerId: '4', text: 'Stopped advancing after 2 tries.' }))
+      .toMatchObject({ status: 'pending', reused: false })
+    expect(() => h.engine.reply({ purpose: 'answer', ticketId: stalledId, triggerId: '4', text: 'Different text.' }))
+      .toThrow(new UserError('noAnswer'))
   })
 })
 describe('ticket commands', () => {

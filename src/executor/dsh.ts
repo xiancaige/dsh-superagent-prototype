@@ -5,8 +5,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { assertTicketDesignApproved } from '../core/design.ts'
-import { blockedForEnvironment, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
+import { advanceBlockedCode, blockedForEnvironment, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
+import type { AdvanceBlockCode, AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
@@ -106,6 +106,8 @@ export interface ExecutorHost {
   repliedTo(trigger: Trigger): Trigger | undefined
   /** Sends an idempotent IM notice when a launch/model failure or watchdog interruption affects a ticket before a worker reply. */
   notifyTicketFailure?(ticket: Ticket, summary: string, options?: { assignmentId?: string; restarted?: boolean }): boolean
+  /** Sends an idempotent IM notice when a worker turn ends while automatic ticket advancement is prohibited. */
+  notifyAdvanceBlocked?(ticket: Ticket, code: AdvanceBlockCode): boolean
   /** Returns unanswered human follow-up triggers to surface in failed/blocked worker_report relays. */
   unansweredTriggers?(ticket: Ticket): { trigger_id: string; preview: string }[]
 }
@@ -271,7 +273,8 @@ export function unrespondedHumanFollowups(ticket: Ticket, triggers: Pick<Store['
  */
 export function unansweredHumanTriggers(ticket: Ticket,
   triggers: Pick<Store['triggers'], 'get' | 'disposition'>): { trigger_id: string; preview: string }[] {
-  const sinceReady = ticket.assignments.findLast(assignment => assignment.report?.state === 'ready')?.report?.at ?? ''
+  const sinceReady = ticket.assignments.findLast(assignment => assignment.report?.state === 'ready'
+    && assignment.report.completion !== 'implementation')?.report?.at ?? ''
   const seen = new Set<string>()
   const result: { trigger_id: string; preview: string }[] = []
   for (const input of ticket.inputs) {
@@ -944,11 +947,14 @@ export class DshExecutor implements Executor {
       // The turn ended without a newer question (handedOff would have returned), so an open question was answered: clear it.
       const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before, question: null,
         ...(answerTo ? { answers: answerTo } : {}) })
+      const blocked = advanceBlockedCode(updated)
+      const unanswered = blocked && this.host.unansweredTriggers ? this.host.unansweredTriggers(updated) : undefined
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
-      if (said) this.relay(resultRelay(updated, 'waiting', said, answerTo))
+      if (said) this.relay(resultRelay(updated, 'waiting', said, answerTo, unanswered))
       else if (!relayedInTurn && !before.trim()) {
-        this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))
+        this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.', undefined, unanswered))
       }
+      if (blocked) this.host.notifyAdvanceBlocked?.(updated, blocked)
     })
   }
 }

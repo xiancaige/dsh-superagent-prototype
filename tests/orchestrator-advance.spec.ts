@@ -2,10 +2,11 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { Engine, MemoryRepositories, UserError, canAdvanceTicket, key, ticketStage, waitsForPerson, type Assessor, type Candidate, type Executor, type Outcome,
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Engine, MemoryRepositories, UserError, advanceBlockedCode, canAdvanceTicket, key, ticketStage, waitsForPerson, type Assessor, type Candidate, type Executor, type Outcome,
   type Policy, type Trigger } from '../src/core/index.ts'
-import { resultRelay } from '../src/app/notices.ts'
+import { advanceBlockedNotices, followupNotice, resultRelay } from '../src/app/notices.ts'
+import { IM_WORDS, wordCount } from '../src/infra/text.ts'
 import { ticketDetail } from '../src/app/views/tickets.ts'
 import { composePrompt, defaultPrompts } from '../src/app/prompts.ts'
 import { masterPrompt } from '../src/app/context.ts'
@@ -502,5 +503,179 @@ describe('prompt contracts for orchestrator advance and DSH restart verification
     masterAgent.steer.mockClear()
     await masterCtx.serial('agent/turn-stopping', { agent: masterAgent, turn: 21, signal: new AbortController().signal } as never)
     expect(masterAgent.steer).not.toHaveBeenCalled()
+  })
+
+  it('preserves advanceModelFailure prohibition and notifies Feishu once when refused or when a subsequent turn finishes', async () => {
+    host = await startRuntime()
+    const { ticket, trigger, sessionId } = await host.acceptedTicket(feishu('1', '@bot 复测并推进'))
+    const agent = host.agents.get(sessionId)!
+
+    // 1. Terminal model error sets hostResumeBudget=0 and sends the initial failure notice.
+    host.ctx.emit('agent/error', { agent, error: Object.assign(new Error('overloaded'), { status: 503 }) } as never)
+    await host.runtime.idle()
+    expect(advanceBlockedCode(host.runtime.store.tickets.get(ticket.id)!)).toBe('advanceModelFailure')
+
+    // Even if the origin trigger was already answered once earlier, the subsequent prohibition still notifies via IM notice.
+    await host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      ticket_id: ticket.id,
+      trigger_id: trigger.id,
+      purpose: 'answer',
+      text: '模型暂时过载暂停。',
+    })
+
+    // 2. Worker later finishes another turn in waiting/implementation state -> modelFailure prohibition stays intact,
+    //    relay exposes advance_blocked, and IM receives ONE advance-blocked notice even without calling advance.
+    const followup = feishu('2', '为什么停了', { mentions: [], root_id: 'om_1' })
+    host.runtime.receive(followup)
+    await host.runtime.idle()
+    await host.runTool(sessionId, 'orchestrator_report', {
+      state: 'ready',
+      completion: 'implementation',
+      summary: '已完成复测，等待后续动作。',
+    })
+    await host.runtime.idle()
+
+    const storedAfter = host.runtime.store.tickets.get(ticket.id)!
+    expect(canAdvanceTicket(storedAfter)).toBe(false)
+    expect(advanceBlockedCode(storedAfter)).toBe('advanceModelFailure')
+
+    const relay = host.relays(host.runtime.masterId).findLast(item => item.kind === 'worker_report') as {
+      advance_blocked?: string
+      can_advance?: boolean
+      unanswered_triggers?: { trigger_id: string }[]
+    }
+    expect(relay.can_advance).toBeUndefined()
+    expect(relay.advance_blocked).toBe('advanceModelFailure')
+    expect(relay.unanswered_triggers).toEqual([expect.objectContaining({ trigger_id: followup.id })])
+
+    const card = await host.runTool(host.runtime.masterId, 'orchestrator_read', { resource: `ticket/${ticket.id}` }) as {
+      advance_blocked?: string
+      can_advance?: boolean
+    }
+    expect(card.can_advance).toBeUndefined()
+    expect(card.advance_blocked).toBe('advanceModelFailure')
+
+    // Calling orchestrator_ticket_advance is still refused and deduplicates the notice for this report.
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Continue anyway.',
+      rationale: 'Should still be prohibited.',
+    })).rejects.toThrow(/terminal model-turn failure/i)
+    await host.runtime.idle()
+
+    const notices = host.runtime.store.receipts.list().filter(item => item.ticketId === ticket.id && item.kind === 'notice')
+    // 1 ticket-failed notice + 1 deduplicated advance-blocked notice.
+    expect(notices).toHaveLength(2)
+    expect(notices[1]!.text).toContain('停止自动推进')
+    expect(notices[1]!.text).toContain('模型失败')
+    expect(wordCount(notices[1]!.text)).toBeLessThanOrEqual(IM_WORDS)
+
+    // Unanswered human follow-up can still be answered via orchestrator_reply purpose=answer in person/review advance-blocked state.
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_reply', {
+      ticket_id: ticket.id,
+      trigger_id: followup.id,
+      purpose: 'answer',
+      text: '工单因残留模型失败标记已禁止自动推进，需要人工显式重试。',
+    })).resolves.toEqual({ status: 'sent' })
+    // Also verify workerIdle (`waiting`) after a personal Web message post-modelFailure preserves the prohibition and notifies IM.
+    const idleTicket = await host.acceptedTicket(feishu('10', '@bot idle通知测试'))
+    const idleAgent = host.agents.get(idleTicket.sessionId)!
+    host.ctx.emit('agent/error', { agent: idleAgent, error: Object.assign(new Error('overloaded'), { status: 503 }) } as never)
+    await host.runtime.idle()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    host.ctx.emit('agent/inbox/claimed', { agent: idleAgent, message: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] } } as never)
+    vi.spyOn(idleAgent.session as unknown as { snapshotEvents: () => unknown[] }, 'snapshotEvents').mockReturnValue([
+      { type: 'turn/start', data: { turn: 2 } },
+      { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '复测完成等待处理。' }] } } },
+    ])
+    idleAgent.status = 'idle'
+    host.ctx.emit('agent/status', { agent: idleAgent, status: 'idle' } as never)
+    await vi.waitFor(async () => {
+      await host!.runtime.idle()
+      const idleNotices = host!.runtime.store.receipts.list().filter(item => item.ticketId === idleTicket.ticket.id && item.kind === 'notice')
+      expect(idleNotices).toHaveLength(2)
+    })
+    const idleNotices = host.runtime.store.receipts.list().filter(item => item.ticketId === idleTicket.ticket.id && item.kind === 'notice')
+    expect(idleNotices[1]!.text).toContain('停止自动推进')
+    const idleRelay = host.relays(host.runtime.masterId).findLast(item => item.kind === 'worker_report') as { state?: string; advance_blocked?: string }
+    expect(idleRelay).toMatchObject({ state: 'waiting', advance_blocked: 'advanceModelFailure' })
+  })
+
+  it('notifies Feishu when advanceStalled or advanceDesignBlocked prohibits advancement and deduplicates refusals', async () => {
+    host = await startRuntime()
+    const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 推进卡住通知测试'))
+
+    // Reach advanceStalled after 2 consecutive advances without progress.
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Waiting step 1' })
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try 1',
+      rationale: 'First advance.',
+    })
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Waiting step 2' })
+    await host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try 2',
+      rationale: 'Second advance.',
+    })
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', completion: 'implementation', summary: 'Still unfinished' })
+    await host.runtime.idle()
+
+    const noticesAfterReport = host.runtime.store.receipts.list().filter(item => item.ticketId === ticket.id && item.kind === 'notice')
+    expect(noticesAfterReport).toHaveLength(1)
+    expect(noticesAfterReport[0]!.text).toContain('停止自动推进')
+    expect(wordCount(noticesAfterReport[0]!.text)).toBeLessThanOrEqual(IM_WORDS)
+
+    // Refusing orchestrator_ticket_advance keeps the prohibition and does not send a duplicate notice.
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: ticket.id,
+      decision: 'Try 3',
+      rationale: 'Should be refused.',
+    })).rejects.toThrow(/no new progress/i)
+    await host.runtime.idle()
+    expect(host.runtime.store.receipts.list().filter(item => item.ticketId === ticket.id && item.kind === 'notice')).toHaveLength(1)
+
+    // Also verify advanceDesignBlocked refusal notifies IM once when orchestrator_ticket_advance is refused,
+    // and surfaces stalled: true in followupNotice.
+    const designTicket = await host.acceptedTicket(feishu('3', '@bot 设计确认测试'))
+    mkdirSync(join(designTicket.ticket.execution!.directory, 'plans'), { recursive: true })
+    writeFileSync(join(designTicket.ticket.execution!.directory, 'plans', 'design.md'), '# Design\n')
+    const pendingStored = host.runtime.store.tickets.get(designTicket.ticket.id)!
+    pendingStored.assignments[0]!.state = 'pending'
+    host.runtime.store.tickets.save(pendingStored)
+    host.runtime.engine.configureDesign(designTicket.ticket.id, { required: true, documentPath: 'plans/design.md', scope: 's' })
+    await expect(host.runTool(host.runtime.masterId, 'orchestrator_ticket_advance', {
+      ticket_id: designTicket.ticket.id,
+      decision: 'Skip design',
+      rationale: 'Should be blocked.',
+    })).rejects.toThrow(/design approval/i)
+    await host.runtime.idle()
+    const designNotices = host.runtime.store.receipts.list().filter(item => item.ticketId === designTicket.ticket.id && item.kind === 'notice')
+    expect(designNotices).toHaveLength(1)
+    expect(designNotices[0]!.text).toContain('设计确认')
+    expect(wordCount(designNotices[0]!.text)).toBeLessThanOrEqual(IM_WORDS)
+
+    const followup = feishu('4', '设计怎么没继续', { mentions: [], root_id: 'om_3' })
+    host.runtime.receive(followup)
+    await host.runtime.idle()
+    const relay = JSON.parse(followupNotice(host.runtime.store, host.runtime.sources, followup.id)!.text) as {
+      delivered_to: { ticket_id: string; stalled?: boolean }[]
+    }
+    expect(relay.delivered_to[0]).toMatchObject({ ticket_id: designTicket.ticket.id, stalled: true })
+  })
+
+  it('formats advanceBlockedNotices cleanly in English and skips GitHub channels', () => {
+    const h = domainHarness()
+    const { ticketId } = h.accept('8')
+    const ticket = h.repo.tickets.get(ticketId)!
+    ticket.channels = [
+      { source: 'feishu', thread: 'feishu:oc:om', address: { chatId: 'oc', messageId: 'om' } },
+      { source: 'github', thread: 'github:1', address: { number: '1' } },
+    ]
+    const msgs = advanceBlockedNotices(ticket, 'Fix the build failure', 'advanceModelFailure')
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]!.channel.source).toBe('feishu')
+    expect(msgs[0]!.text).toContain('stopped advancing')
+    expect(wordCount(msgs[0]!.text)).toBeLessThanOrEqual(IM_WORDS)
   })
 })
