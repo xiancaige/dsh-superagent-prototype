@@ -44,6 +44,8 @@ const SLOT_WAIT_MS = 5000
  */
 const WATCHDOG_EVERY_MS = 60_000
 const WATCHDOG_STALE_MS = 15 * 60_000
+/** How long a human follow-up may sit unconsumed on an idle worker before the watchdog automatically wakes a new assignment. */
+export const UNCONSUMED_HUMAN_INPUT_MS = 120_000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
 const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
 /**
@@ -747,7 +749,7 @@ export class DshExecutor implements Executor {
   }
   /** Ends every running Assignment whose worker no longer runs it; see `watchdog`. */
   private sweepStale(): void {
-    if (this.host.closing()) return
+    if (this.host.closing() || this.host.paused()) return
     for (const ticket of this.host.store.tickets.open()) {
       const latest = latestAssignment(ticket)
       // A ticket the launcher skipped because it read as waiting for an environment whose holder is gone for good: `start`
@@ -774,18 +776,30 @@ export class DshExecutor implements Executor {
       const report = assignment.report
       const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
       const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
-      if (settled && !ticket.undelivered.length) continue
+      const readAtMs = Math.max(
+        report ? Date.parse(report.at) : 0,
+        assignment.idleAt ? Date.parse(assignment.idleAt) : 0,
+      )
+      const unconsumedHuman = ticket.inputs.find(input => fromPerson(input) && Date.parse(input.at) > readAtMs)
+      const unconsumedWait = unconsumedHuman ? Date.now() - Date.parse(unconsumedHuman.at) : NaN
+      const humanStalled = Number.isFinite(unconsumedWait) && unconsumedWait >= UNCONSUMED_HUMAN_INPUT_MS
+      if (settled && !ticket.undelivered.length && !humanStalled) continue
       // No Session at all means the worker is gone outright — never launched here, or killed with its record left behind —
       // so its Assignment ends at once: waiting for the timeout would keep the TP environment held for a worker that cannot
-      // release it. A Session that exists but reports nothing still gets the full timeout, since it may be between steps.
+      // release it. A Session that exists but reports nothing still gets the full timeout, unless a human follow-up has sat
+      // unconsumed past `UNCONSUMED_HUMAN_INPUT_MS`.
       const last = assignment.report?.at ?? assignment.startedAt ?? assignment.createdAt
       const quiet = Date.now() - Date.parse(last)
-      if (agent && (!Number.isFinite(quiet) || quiet < WATCHDOG_STALE_MS)) continue
-      if (settled) {
+      if (!humanStalled && agent && (!Number.isFinite(quiet) || quiet < WATCHDOG_STALE_MS)) continue
+      if (settled && !humanStalled) {
         this.host.engine.assignmentInterrupted(ticket.id, assignment.id)
         continue
       }
-      const why = agent ? `stopped without reporting ${Math.round(quiet / 60_000)} minutes ago` : 'has no Session'
+      const why = !agent
+        ? 'has no Session'
+        : humanStalled
+          ? `unconsumed human input for ${Math.max(1, Math.round(unconsumedWait / 60_000))} minutes`
+          : `stopped without reporting ${Math.round(quiet / 60_000)} minutes ago`
       this.host.health.set({ state: 'error', at: now(), detail: `Worker of ticket ${ticket.id} ${why}; ended its assignment` })
       this.stopWork(ticket.id, 'worker stopped without reporting', true)
       this.host.engine.assignmentInterrupted(ticket.id, assignment.id)

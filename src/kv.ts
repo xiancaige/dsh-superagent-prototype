@@ -64,6 +64,8 @@ export const KV = {
     /** Per-ticket dedicated Feishu topic binding (1-to-1 between ticket and topic root message) to prevent cross-topic replies. */
     topic: family<FeishuTopic, [ticket: string]>('feishu-topic:'),
     topicRoot: family<FeishuTopic, [message: string]>('feishu-topic-root:'),
+    /** Outbound Feishu bot message ID → ticket ID mapping for quote-reply unicast routing and ended-ticket resume. */
+    messageTicket: family<string, [message: string]>('feishu-msg-ticket:'),
     /** Per-ticket state for periodic long-task progress sync messages sent to Feishu. */
     progressSync: family<FeishuProgressSyncState, [ticket: string]>('feishu-progress-sync:') },
   /**
@@ -79,4 +81,11 @@ export interface FeishuMirror { ticketId: string; chatId: string; messageId: str
 /** Dedicated Feishu topic bound 1-to-1 to a ticket: all outbound Feishu replies for `ticketId` stay inside `messageId`'s topic. */
 export interface FeishuTopic { ticketId: string; chatId: string; messageId: string; direct: boolean }
 /** Per-ticket state for periodic Feishu intermediate progress synchronization. */
-export interface FeishuProgressSyncState { assignmentId: string; lastSentAt: number; syncCount: number; lastReceiptIds?: string[] }
+export interface FeishuProgressSyncState {
+  assignmentId: string
+  lastSentAt: number
+  syncCount: number
+  lastReceiptIds?: string[]
+  lastFingerprint?: string
+  unchangedStreak?: number
+}

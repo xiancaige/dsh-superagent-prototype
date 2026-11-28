@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { USER_ERRORS, advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, followupOwners, key, latestAssignment, latestReport, liveTicket, type AdvanceBlockCode, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
+import { USER_ERRORS, advanceBlockedCode, blockedForEnvironment, canAdvanceTicket, followupOwners, key, latestAssignment, latestReport, liveTicket, readUntil, waitsForPerson, type AdvanceBlockCode, type Decision, type DomainEvent, type OutboundMessage, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { IM_WORDS, imSummary } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -79,11 +79,24 @@ export interface Relay { id: string; text: string }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
 const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
   + '(orchestrator_route kind stop with this trigger_id).'
-const STALLED_FOLLOWUP_NOTE = `${FOLLOWUP_NOTE} When a listed ticket is stalled (environment-blocked or failed), answer the person directly with orchestrator_reply purpose=answer.`
+const STALLED_FOLLOWUP_NOTE = `${FOLLOWUP_NOTE} When a listed ticket is stalled (blocked, environment-blocked, or failed), answer the person directly with orchestrator_reply purpose=answer.`
+/** How long a human follow-up may sit unconsumed on a blocked/failed ticket before follow-up relays flag it as stalled. */
+export const FOLLOWUP_UNCONSUMED_STALLED_MS = 90_000
 /** Unanswered human follow-up trigger summarized inside a failed/blocked worker report relay. */
 export interface UnansweredTrigger { trigger_id: string; preview: string }
-const isTicketStalledForFollowup = (ticket: Ticket): boolean =>
-  blockedForEnvironment(ticket) || !!ticket.delivery || !!advanceBlockedCode(ticket)
+/** Whether a live ticket is stalled when a human follow-up arrives (blocked/failed without consuming prior human input, environment-blocked, delivery-failed, or advance-blocked). */
+export function isTicketStalledForFollowup(ticket: Ticket, nowMs = Date.now()): boolean {
+  if (blockedForEnvironment(ticket) || !!ticket.delivery || !!advanceBlockedCode(ticket) || waitsForPerson(ticket)) return true
+  const report = latestAssignment(ticket)?.report
+  if (report?.state !== 'blocked' && report?.state !== 'failed') return false
+  const readAt = Date.parse(readUntil(ticket, false))
+  const cutoff = Number.isFinite(readAt) ? readAt : 0
+  const oldestUnconsumed = ticket.inputs.find(input =>
+    input.kind === 'trigger' && input.human && !input.context && Date.parse(input.at) > cutoff)
+  if (!oldestUnconsumed) return false
+  const waited = nowMs - Date.parse(oldestUnconsumed.at)
+  return Number.isFinite(waited) && waited >= FOLLOWUP_UNCONSUMED_STALLED_MS
+}
 /**
  * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
@@ -215,28 +228,45 @@ function formatFailureReason(summary: string, chinese: boolean): string {
       if (why === 'has no Session') return '工作会话丢失'
       const stale = /^stopped without reporting (\d+) minutes ago$/i.exec(why)
       if (stale) return `工作会话超时未汇报（${stale[1]} 分钟）`
+      const unconsumed = /^unconsumed human input for (\d+) minutes$/i.exec(why)
+      if (unconsumed) return `人工追问已等待 ${unconsumed[1]} 分钟未消费`
     }
     return imSummary(why, 35, '…')
   }
   if (!cleaned) return chinese ? '执行异常' : 'execution error'
   return imSummary(cleaned, 35, '…')
 }
+/** Counts trailing assignments on `ticket` that ended or failed with a model turn error. */
+export function consecutiveModelFailures(ticket: Pick<Ticket, 'assignments'>): number {
+  let count = 0
+  for (let i = ticket.assignments.length - 1; i >= 0; i--) {
+    const item = ticket.assignments[i]!
+    const isModelFail = !!item.modelFailure
+      || (item.report?.state === 'failed' && /Model turn failed/i.test(item.report.summary))
+    if (!isModelFail) break
+    count++
+  }
+  return count
+}
 /**
  * Builds idempotent IM notices when a ticket assignment terminally fails (e.g. prepare failure or terminal model failure)
  * or is interrupted and auto-restarted by the watchdog, so Feishu operators never sit without notice even before or without an orchestrator follow-up reply.
  */
 export function ticketFailedNotices(ticket: Ticket, request: string, summary: string,
-  options: { assignmentId?: string; restarted?: boolean } = {}): OutboundMessage[] {
+  options: { assignmentId?: string; restarted?: boolean; modelSwitchHint?: boolean } = {}): OutboundMessage[] {
   const chinese = chineseRequest(request, summary)
   const detail = formatFailureReason(summary, chinese)
   const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 18, '…')
+  const switchHint = options.modelSwitchHint
+    ? (chinese ? '已连续模型失败，已推送模型切换卡片（或发 /model 切换）。' : 'Repeated model failures; sent model switch card (or run /model).')
+    : ''
   const raw = options.restarted
     ? chinese
       ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）工作会话中断（${detail}），宿主已自动重新排队恢复。`
       : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) session interrupted (${detail}); host requeued it for automatic recovery.`
     : chinese
-      ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）执行失败（${detail}），已暂停等待恢复或重试。`
-      : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) failed (${detail}) and is paused for recovery or retry.`
+      ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）执行失败（${detail}），已暂停等待恢复或重试。${switchHint}`
+      : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) failed (${detail}) and is paused for recovery or retry.${switchHint ? ` ${switchHint}` : ''}`
   const text = imSummary(raw, IM_WORDS - 5, '…')
   return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
     id: key('ticket-failed', ticket.id, options.assignmentId ?? '', channel.source, JSON.stringify(channel.address)),

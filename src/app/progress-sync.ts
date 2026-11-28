@@ -19,6 +19,8 @@ import type { Store } from './store.ts'
 export { DEFAULT_PROGRESS_INTERVAL_SECONDS }
 /** How often the host checks running tickets for due Feishu progress updates. */
 const SWEEP_EVERY_MS = 30_000
+/** Maximum interval multiplier (1x -> 2x -> 3x, e.g. 10m -> 20m -> 30m) when progress state is unchanged. */
+export const MAX_PROGRESS_BACKOFF_MULTIPLIER = 3
 
 interface SubagentsService {
   listDescendants?(rootSessionId: SessionId): Promise<readonly { id: string; activity?: string }[]>
@@ -38,10 +40,17 @@ export interface ProgressSyncHost {
   sweepEveryMs?: number
 }
 
+export interface TodoProgress {
+  completed: number
+  total: number
+  current?: string
+}
+
 export interface ProgressSnapshot {
   elapsedMs: number
   isNewReport: boolean
   reportSummary?: string
+  todo?: TodoProgress
   lastAssistantText?: string
   inFlightTools: string[]
   toolCount: number
@@ -181,6 +190,41 @@ function assistantText(event: SessionEvent): string {
     .join(' ')
 }
 
+function extractLatestTodo(events: readonly SessionEvent[]): TodoProgress | undefined {
+  let latest: TodoProgress | undefined
+  for (const event of events) {
+    if (event.type !== 'tool/call' || event.data.name !== 'todo_write') continue
+    const todos = parseArgs(event.data.arguments).todos
+    if (!Array.isArray(todos) || !todos.length) continue
+    let completed = 0
+    let current: string | undefined
+    let total = 0
+    for (const item of todos) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as { content?: unknown; status?: unknown }
+      if (typeof record.content !== 'string' || !record.content.trim()) continue
+      total++
+      if (record.status === 'completed') completed++
+      else if (!current && record.status === 'in_progress') current = cleanSnippet(record.content, 48)
+    }
+    if (total > 0) latest = { completed, total, ...(current ? { current } : {}) }
+  }
+  return latest
+}
+
+/** Stable state fingerprint used to back off repeated identical progress sync messages (1x -> 2x -> 3x interval). */
+export function progressFingerprint(snapshot: ProgressSnapshot): string {
+  return JSON.stringify({
+    report: snapshot.reportSummary ?? '',
+    todo: snapshot.todo ?? null,
+    validation: snapshot.validationRunning,
+    jobs: snapshot.jobs,
+    subagents: snapshot.subagentsCount,
+    files: snapshot.recentFiles,
+    inFlight: snapshot.inFlightTools,
+  })
+}
+
 /** Collects live intermediate progress facts from the ticket record, worker session events, background jobs, and subagents. */
 export function collectProgressSnapshot(input: {
   ticket: Ticket
@@ -218,6 +262,7 @@ export function collectProgressSnapshot(input: {
     }
   }
   const inFlightTools = [...openCalls.values()].slice(-2).map(call => summarizeToolCall(call.name, call.arguments, chinese))
+  const todo = extractLatestTodo(assignmentEvents)
   const report = assignment.report
   const reportSummary = report?.state === 'progress' && report.summary.trim() ? cleanSnippet(report.summary, 120) : undefined
   const reportMs = report?.state === 'progress' ? Date.parse(report.at) : NaN
@@ -231,6 +276,7 @@ export function collectProgressSnapshot(input: {
     elapsedMs: Math.max(0, nowMs - startedMs),
     isNewReport,
     ...(reportSummary ? { reportSummary } : {}),
+    ...(todo ? { todo } : {}),
     ...(lastAssistantText ? { lastAssistantText } : {}),
     inFlightTools,
     toolCount,
@@ -261,9 +307,15 @@ export function formatProgressSyncMessage(ticket: Pick<Ticket, 'id' | 'title'>, 
     : `Ticket ${shortId} (${shortTitle}) progress (${duration} elapsed): `
 
   const parts: string[] = []
+  if (snapshot.todo && snapshot.todo.total > 0) {
+    const { completed, total, current } = snapshot.todo
+    parts.push(chinese
+      ? `进度 ${completed}/${total}${current ? `（进行中：${imSummary(current, 32, '…')}）` : ''}`
+      : `progress ${completed}/${total}${current ? ` (in progress: ${imSummary(current, 32, '…')})` : ''}`)
+  }
   if (snapshot.isNewReport && snapshot.reportSummary) {
     parts.push(imSummary(snapshot.reportSummary, 45, '…'))
-  } else if (snapshot.lastAssistantText) {
+  } else if (!snapshot.todo && snapshot.lastAssistantText) {
     parts.push(imSummary(snapshot.lastAssistantText, 40, '…'))
   }
 
@@ -352,7 +404,8 @@ export class FeishuProgressSync {
       const prev = store.get(KV.feishu.progressSync(ticket.id))
       const sameAssignment = prev?.assignmentId === assignment.id
       const anchorMs = sameAssignment ? Math.max(prev.lastSentAt, stretchStartMs) : stretchStartMs
-      if (!Number.isFinite(anchorMs) || nowMs < anchorMs || nowMs - anchorMs < intervalMs) continue
+      const multiplier = sameAssignment ? Math.min(MAX_PROGRESS_BACKOFF_MULTIPLIER, 1 + (prev.unchangedStreak ?? 0)) : 1
+      if (!Number.isFinite(anchorMs) || nowMs < anchorMs || nowMs - anchorMs < intervalMs * multiplier) continue
       if (sameAssignment && prev.lastReceiptIds?.some(id => store.replyStatus(id) === 'pending')) continue
 
       const sessionId = workerSessionId(ticket.id)
@@ -373,7 +426,8 @@ export class FeishuProgressSync {
         const currentSame = currentPrev?.assignmentId === currentAssignment.id
         const currentStretch = activeStretchStartMs(current, currentAssignment)
         const currentAnchor = currentSame ? Math.max(currentPrev.lastSentAt, currentStretch) : currentStretch
-        if (!Number.isFinite(currentAnchor) || nowMs < currentAnchor || nowMs - currentAnchor < intervalMs) return
+        const currentMultiplier = currentSame ? Math.min(MAX_PROGRESS_BACKOFF_MULTIPLIER, 1 + (currentPrev.unchangedStreak ?? 0)) : 1
+        if (!Number.isFinite(currentAnchor) || nowMs < currentAnchor || nowMs - currentAnchor < intervalMs * currentMultiplier) return
         if (currentSame && currentPrev.lastReceiptIds?.some(id => store.replyStatus(id) === 'pending')) return
 
         const currentChannels = targetChannels(current, mirror)
@@ -394,6 +448,10 @@ export class FeishuProgressSync {
           chinese,
         })
         const text = formatProgressSyncMessage(current, snapshot, chinese)
+        const fingerprint = progressFingerprint(snapshot)
+        const unchangedStreak = currentSame && currentPrev.lastFingerprint === fingerprint
+          ? Math.min(MAX_PROGRESS_BACKOFF_MULTIPLIER - 1, (currentPrev.unchangedStreak ?? 0) + 1)
+          : 0
         const syncCount = (currentSame ? currentPrev.syncCount : 0) + 1
         const receiptIds: string[] = []
         for (const channel of currentChannels) {
@@ -407,6 +465,8 @@ export class FeishuProgressSync {
           lastSentAt: nowMs,
           syncCount,
           lastReceiptIds: receiptIds,
+          lastFingerprint: fingerprint,
+          unchangedStreak,
         })
       })
     }

@@ -7,7 +7,7 @@ import { readFile, realpath } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { resolve, relative, isAbsolute } from 'node:path'
-import { canRetry, key, latestReport, liveTicket, ticketStage, type EngineForMainSession, type EngineForPeople, type Ticket,
+import { canRetry, key, latestReport, liveTicket, runningAssignment, threadKey, ticketStage, type EngineForMainSession, type EngineForPeople, type Ticket,
   type TicketOutcome, type Trigger } from '../core/index.ts'
 import { allowedSender, type RoleModel } from '../policy.ts'
 import { family } from '../kv.ts'
@@ -184,6 +184,20 @@ export function buildTicketDetailCard(ticket: Ticket, request?: string): object 
 }
 
 const receipts = family<{ text: string }>('feishu-command:')
+const STATUS_PROBE_RE = /^(?:(?:看下?|查下?|查一下|查询|看看|当前|现在|目前)?(?:进度|状态|工单进度|工单状态|任务进度|任务状态|进展|情况)(?:如何|怎么样|怎样|咋样|了)?|结束(?:成功)?了吗|完成了吗|搞定了吗|好了吗|跑完了吗|status|progress)$/i
+const STATUS_PREFIX_TARGET_RE = /^(?:(?:看下?|查下?|查一下|查询|看看)?(?:进度|状态|工单进度|工单状态|进展|status|progress))\s+([0-9a-f]{6,64})$/i
+const STATUS_SUFFIX_TARGET_RE = /^([0-9a-f]{6,64})\s+(?:(?:的)?(?:进度|状态|进展|情况)(?:如何|怎么样|怎样|咋样|了)?|结束(?:成功)?了吗|完成了吗|搞定了吗|好了吗|跑完了吗|status|progress)$/i
+/** Recognizes unambiguous short read-only status/progress queries eligible for the deterministic Feishu fast-path. */
+export function parseFastStatusQuery(raw: string): { target?: string } | undefined {
+  const cleaned = raw.trim().replace(/[？?！!。.,，\s]+$/u, '').trim()
+  if (!cleaned || cleaned.length > 80) return undefined
+  if (STATUS_PROBE_RE.test(cleaned)) return {}
+  const prefix = STATUS_PREFIX_TARGET_RE.exec(cleaned)
+  if (prefix) return { target: prefix[1]! }
+  const suffix = STATUS_SUFFIX_TARGET_RE.exec(cleaned)
+  if (suffix) return { target: suffix[1]! }
+  return undefined
+}
 const HELP = '工单：/tickets [筛选] [页] 列表；/ticket <ID> 状态；/stop <ID> [原因] 结束；/retry <ID> 重试；/ask <ID> 催报；/note <ID> <内容> 备注。控制：/status 总览；/pause|/resume 暂停恢复；/env 环境锁；/unlock [force] 解锁源工程；/sync 名单；/todo [编号]；/model 模型。'
 export interface FeishuCommandsHost {
   context: Context
@@ -314,12 +328,53 @@ export class FeishuCommands {
     this.chain = run.catch(() => {})
     return run
   }
+  /** Proactively sends an interactive model switch card to a Feishu chat (e.g. after consecutive model failures), deduplicated by `requestKey`. */
+  sendModelSwitchCard(options: { chatId: string; actorId: string; direct: boolean; requestKey: string }): Promise<boolean> {
+    const run = this.chain.then(async () => {
+      if (!this.host.sendModelCard) return false
+      const { store, sources } = this.host
+      if (!allowedSender(store.settings(), { source: 'feishu', id: options.actorId })
+        || !sources.scope({ source: 'feishu', meta: { chatId: options.chatId, direct: options.direct } }).listened) return false
+      const receipt = receipts(key('auto-model-card', options.requestKey))
+      if (store.get(receipt)) return false
+      const catalog = await this.host.context.sessionController.modelCatalog()
+      const request = randomUUID()
+      store.set(cards(request), { actor: options.actorId, chatId: options.chatId, direct: options.direct, at: Date.now() })
+      await this.host.sendModelCard({ id: options.requestKey, chatId: options.chatId },
+        buildModelCard(catalog, store.settings().eval.model ?? catalog.default, request))
+      store.set(receipt, { text: 'card sent' })
+      return true
+    })
+    this.chain = run.catch(() => {})
+    return run
+  }
   private async handle(trigger: Trigger): Promise<boolean> {
     if (trigger.source !== 'feishu') return false
     // Feishu puts the bot mention before the command. Do not strip arbitrary quoted text.
     const text = trigger.text.trim().replace(trigger.addressed === 'mention' ? /^@\S+\s+/ : /$^/, '')
     const match = /^(\/?todo|\/model|\/mode|\/tickets?|\/status|\/overview|\/stop|\/end|\/retry|\/ask|\/ping|\/note|\/pause|\/resume|\/env|\/unlock|\/sync|\/h|\/help)(?:\s+([\s\S]*))?$/i.exec(text)
-    if (!match) return false
+    if (!match) {
+      const fastStatus = parseFastStatusQuery(text)
+      if (!fastStatus) return false
+      const { store, sources, outbox } = this.host
+      if (!trigger.human || !allowedSender(store.settings(), trigger.actor) || !trigger.addressed || !sources.scope(trigger).listened) return false
+      if (!trigger.channel) return false
+      const receipt = receipts(trigger.id)
+      if (store.get(receipt)?.text === undefined) {
+        let response: string
+        try {
+          response = this.fastStatusReply(trigger, fastStatus.target)
+        } catch (error) {
+          response = `查询未完成：${error instanceof Error ? error.message.slice(0, 120) : '执行失败'}。`
+        }
+        response = imSummary(response)
+        store.atomic(() => {
+          store.set(receipt, { text: response })
+          outbox.send({ id: key('feishu-command', trigger.id), channel: trigger.channel!, text: response, kind: 'reply' })
+        })
+      }
+      return true
+    }
     const { store, sources, outbox } = this.host
     // Thread subscriptions do NOT grant command privileges. Bots, unlisted people and unaddressed group messages cannot act.
     if (!trigger.human || !allowedSender(store.settings(), trigger.actor) || !trigger.addressed || !sources.scope(trigger).listened) return true
@@ -393,6 +448,54 @@ export class FeishuCommands {
     if (command === '/unlock') return this.unlock(args)
     if (command === '/sync') return this.sync(args)
     return HELP
+  }
+  private fastStatusReply(trigger: Trigger, explicitTarget?: string): string {
+    const ticket = explicitTarget
+      ? this.resolveTicket(explicitTarget)
+      : this.contextTicketForStatus(trigger)
+    if (ticket) return this.fastTicketStatus(ticket)
+    const all = this.allTickets()
+    const open = all.filter(liveTicket)
+    if (!open.length) {
+      const latest = all[0]
+      if (!latest) return '当前无进行中工单。'
+      const report = latestReport(latest)
+      const tail = report ? `（${singleLine(report.summary, 36)}）` : ''
+      return `当前无进行中工单。最近工单：${latest.id.slice(0, 8)} [${ticketStateText(latest)}] ${singleLine(latest.title, 22)}${tail}`
+    }
+    const rows = open.slice(0, 4).map(item =>
+      `${item.id.slice(0, 8)} [${ticketStateText(item)}] ${singleLine(item.title, 20)}`)
+    const more = open.length > 4 ? ` 等共 ${open.length} 个` : ''
+    return `进行中工单（${open.length} 个${more}）：\n${rows.join('\n')}\n发 /ticket <ID> 看详情。`
+  }
+  private contextTicketForStatus(trigger: Trigger): Ticket | undefined {
+    const { store } = this.host
+    const quoted = typeof trigger.meta.quotedTicket === 'string' && trigger.meta.quotedTicket ? trigger.meta.quotedTicket : undefined
+    if (quoted) {
+      const exact = store.tickets.get(quoted)
+      if (exact) return exact
+    }
+    const primary = trigger.threads[0] ? store.threads.get(threadKey(trigger.threads[0])) : undefined
+    if (!primary?.subscriptions.length) return undefined
+    const subs = primary.subscriptions.flatMap(id => {
+      const item = store.tickets.get(id)
+      return item ? [item] : []
+    })
+    const liveSubs = subs.filter(liveTicket)
+    if (liveSubs.length === 1) return liveSubs[0]
+    if (!liveSubs.length && subs.length === 1) return subs[0]
+    return undefined
+  }
+  private fastTicketStatus(ticket: Ticket): string {
+    const report = latestReport(ticket)
+    const running = runningAssignment(ticket)
+    const elapsedMin = running?.startedAt ? Math.max(1, Math.round((Date.now() - Date.parse(running.startedAt)) / 60_000)) : undefined
+    const timing = liveTicket(ticket) && elapsedMin && Number.isFinite(elapsedMin) ? `，已运行 ${elapsedMin} 分钟` : ''
+    const detail = ticket.attention ? `待回答：${singleLine(ticket.attention.question, 42)}`
+      : ticket.delivery ? `投递失败：${singleLine(ticket.delivery.error, 42)}`
+      : report ? `${report.state}：${singleLine(report.summary, 48)}`
+      : ticket.ended ? `结果：${OUTCOME_LABELS[ticket.ended.outcome]}` : '暂无阶段汇报'
+    return `工单 ${ticket.id.slice(0, 8)} [${ticketStateText(ticket)}${timing}] ${singleLine(ticket.title, 28)}\n${detail}`
   }
   private requireEngine() {
     if (!this.host.engine) throw new Error('工单管理引擎未就绪')

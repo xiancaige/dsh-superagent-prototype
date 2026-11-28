@@ -44,8 +44,12 @@ export class Intake extends EnginePart {
     // (`工单 #<id>`, read into `meta.quotedTicket`) addresses an existing ticket. So a ticket reaches a plain WeCom message
     // only when the quote names it — otherwise the fan-out would hand it to every ticket in the chat and Eval would call it
     // already delivered.
-    const quoted = trigger.source === 'wecom' && typeof trigger.meta.quotedTicket === 'string' ? trigger.meta.quotedTicket : ''
-    const addressed = (ticketId: string): boolean => trigger.source !== 'wecom' || (!!quoted && ticketId.toLowerCase().startsWith(quoted))
+    const quoted = typeof trigger.meta.quotedTicket === 'string' ? trigger.meta.quotedTicket.toLowerCase() : ''
+    const addressed = (ticketId: string): boolean => {
+      if (trigger.source === 'wecom') return !!quoted && ticketId.toLowerCase().startsWith(quoted)
+      if (trigger.source === 'feishu' && quoted) return ticketId.toLowerCase().startsWith(quoted)
+      return true
+    }
     const target = explicitTicketTarget(trigger, this.repo.tickets.list())
     const feishuChatId = trigger.source === 'feishu' && typeof trigger.meta.chatId === 'string' ? trigger.meta.chatId : ''
     const feishuRootId = trigger.source === 'feishu'
@@ -81,6 +85,12 @@ export class Intake extends EnginePart {
         reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
       }
       this.repo.threads.save(thread)
+    }
+    // A Feishu quote-reply to a ticket's message addresses that ticket directly even when the quote landed outside its original thread.
+    if (trigger.source === 'feishu' && quoted && target && !reached.has(target)) {
+      const quotedTarget = this.repo.tickets.get(target)
+      const resumes = trigger.human && quotedTarget?.ended?.by !== 'human'
+      if (quotedTarget && (liveTicket(quotedTarget) || resumes)) reached.set(target, { ticket: quotedTarget, context: false })
     }
     // Shared thread membership is context, not authority to restart ended work. Even a
     // one-word probe formerly resumed every completed ticket subscribed to this chat.

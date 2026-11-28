@@ -2,7 +2,7 @@
 import { reasonText, ticketStage, type Decision, type Thread } from '../../core/index.ts'
 import type { Health } from '../../sources/host.ts'
 import type { SetupProblem } from '../../setup.ts'
-import { anyoneAllowed } from '../../policy.ts'
+import { allowedSender, anyoneAllowed } from '../../policy.ts'
 import type { Store } from '../store.ts'
 import type { SourceLockStatus } from '../source-lock.ts'
 import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
@@ -31,6 +31,33 @@ export function evalsHealth(store: Store, now = Date.now()): Health {
   const latest = open[0]!.decision
   return { state: 'error', at: latest.at, detail: `${open.length} Eval(s) unavailable in the last hour without a later judgement; `
     + `the latest on ${latest.threadKey}: ${reasonText(latest.reason)}` }
+}
+/** Reports error health when a historical ticket originator was ignored with `not_a_member` in the last 24 hours and is still outside the allowlist. */
+export function allowlistHealth(store: Store, now = Date.now()): Health {
+  const since = new Date(now - 86_400_000).toISOString()
+  const settings = store.settings()
+  const historical = new Set(store.tickets.list().map(ticket => `${ticket.mandate.actor.source}:${ticket.mandate.actor.id}`))
+  if (!historical.size) return { state: 'ready', detail: 'No historical operator blocked by allowlist in the last 24 hours' }
+  const blocked = new Map<string, string>()
+  let latestAt = ''
+  for (const decision of store.read.decisionsOfKinds(['ignore'], 100)) {
+    if (decision.at < since || decision.dismissed) continue
+    if (!decision.reason.some(item => item.code === 'not_a_member')) continue
+    for (const triggerId of decision.triggerIds) {
+      const trigger = store.triggers.get(triggerId)
+      if (!trigger?.human) continue
+      const keyName = `${trigger.actor.source}:${trigger.actor.id}`
+      if (!historical.has(keyName) || allowedSender(settings, trigger.actor)) continue
+      if (!blocked.has(keyName)) blocked.set(keyName, trigger.actor.id)
+      if (decision.at > latestAt) latestAt = decision.at
+    }
+  }
+  if (!blocked.size) return { state: 'ready', detail: 'No historical operator blocked by allowlist in the last 24 hours' }
+  return {
+    state: 'error',
+    at: latestAt,
+    detail: `Historical operator(s) blocked by allowlist (not_a_member) in the last 24h: ${[...blocked.keys()].slice(0, 5).join(', ')}`,
+  }
 }
 /**
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.

@@ -25,7 +25,7 @@ import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
-import { evalsHealth } from './views/overview.ts'
+import { allowlistHealth, evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { diagnoseTicketAnalysisSource, installTicketAnalysis, resolveTicketAnalysisSource } from './ticket-analysis.ts'
@@ -34,8 +34,8 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { advanceBlockedNotices, environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
-import { hasPendingMasterWork, notifyEvalTimeout, recoverTimedOutEvals } from './eval-recovery.ts'
+import { advanceBlockedNotices, consecutiveModelFailures, environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
+import { hasPendingMasterWork, notifyEvalTimeout, notifySlowEvals, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Mirror } from './mirror.ts'
@@ -335,10 +335,26 @@ export class Runtime extends Service implements SourceHost {
         if (!setup.configured()) return false
         const request = store.triggers.get(failed.origin.triggerId)?.text ?? failed.title
         const assignmentId = options?.assignmentId ?? latestAssignment(failed)?.id
-        const messages = isEnvironmentLockSummary(summary)
+        const envLock = isEnvironmentLockSummary(summary)
+        const modelSwitchHint = !envLock && !options?.restarted && consecutiveModelFailures(failed) >= 2
+        const messages = envLock
           ? environmentLockNotices(failed, request, summary, { assignmentId })
-          : ticketFailedNotices(failed, request, summary, { assignmentId, restarted: options?.restarted })
+          : ticketFailedNotices(failed, request, summary, { assignmentId, restarted: options?.restarted, modelSwitchHint })
         for (const message of messages) outbox.send(message)
+        if (modelSwitchHint) {
+          const feishuChan = failed.channels.find(channel => channel.source === 'feishu' && channel.address.chatId)
+          const actorId = failed.mandate.actor.source === 'feishu'
+            ? failed.mandate.actor.id
+            : sources.policyPart('feishu')?.allowed[0]?.id
+          if (feishuChan?.address.chatId && actorId) {
+            void feishuCommands.sendModelSwitchCard({
+              chatId: feishuChan.address.chatId,
+              actorId,
+              direct: feishuChan.address.direct === 'true',
+              requestKey: `${failed.id}:${assignmentId ?? failed.assignments.length}`,
+            }).catch(() => {})
+          }
+        }
         return messages.length > 0
       }
       const notifyAdvanceBlocked = (blocked: Ticket, code: AdvanceBlockCode): boolean => {
@@ -467,9 +483,15 @@ export class Runtime extends Service implements SourceHost {
               ...reason ? { reason } : {}, at: event.at })
           }
         } })
-      // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
+      // Update the `evals` and `allowlist` health entries on every pass, and notify slow explicit Feishu evaluations.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
-      const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
+      const allowlist = board.claim('allowlist', { state: 'ready', detail: 'No historical operator blocked by allowlist in the last 24 hours' })
+      const evaluateDue = () => {
+        engine.evaluateDue()
+        evals.set(evalsHealth(store))
+        allowlist.set(allowlistHealth(store))
+        if (setup.configured()) notifySlowEvals({ store, outbox, paused: this.paused() })
+      }
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       const feishuCommands = new FeishuCommands({ context: ctx, store, settings: this.settings, sessions, outbox, sources,

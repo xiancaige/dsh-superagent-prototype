@@ -28,6 +28,67 @@ export function feishuTime(value: string): string {
   if (!Number.isFinite(time)) throw new Error(`Unreadable Feishu message time: ${value}`)
   return new Date(time).toISOString()
 }
+/** Extracts readable plain text from a Feishu `post` rich-text JSON object (either localized `{ zh_cn: { title, content } }` or unwrapped `{ title, content }`). */
+export function extractFeishuPostText(content: unknown): string | undefined {
+  if (!content || typeof content !== 'object' || Array.isArray(content)) return undefined
+  const record = content as Record<string, unknown>
+  let body: { title?: unknown; content?: unknown } | undefined
+  if (Array.isArray(record.content)) {
+    body = record
+  } else {
+    for (const keyName of ['zh_cn', 'en_us', 'ja_jp', ...Object.keys(record)]) {
+      const candidate = record[keyName]
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate) && Array.isArray((candidate as { content?: unknown }).content)) {
+        body = candidate as { title?: unknown; content?: unknown }
+        break
+      }
+    }
+  }
+  if (!body || !Array.isArray(body.content)) return undefined
+  const lines: string[] = []
+  if (typeof body.title === 'string' && body.title.trim()) lines.push(body.title.trim())
+  for (const paragraph of body.content) {
+    if (!Array.isArray(paragraph)) continue
+    const parts: string[] = []
+    for (const node of paragraph) {
+      if (!node || typeof node !== 'object') continue
+      const item = node as Record<string, unknown>
+      const tag = typeof item.tag === 'string' ? item.tag : ''
+      if (tag === 'text' || tag === 'md' || tag === 'code_block') {
+        if (typeof item.text === 'string') parts.push(item.text)
+      } else if (tag === 'a') {
+        const label = typeof item.text === 'string' ? item.text.trim() : ''
+        const href = typeof item.href === 'string' ? item.href.trim() : ''
+        if (label && href && label !== href) parts.push(`${label} (${href})`)
+        else if (label || href) parts.push(label || href)
+      } else if (tag === 'at') {
+        const name = typeof item.user_name === 'string' && item.user_name.trim() ? item.user_name.trim()
+          : typeof item.user_id === 'string' && item.user_id.trim() ? item.user_id.trim() : ''
+        if (name) parts.push(`@${name}`)
+      } else if (tag === 'emotion') {
+        if (typeof item.emoji_type === 'string' && item.emoji_type.trim()) parts.push(`[${item.emoji_type.trim()}]`)
+      } else if (tag !== 'img' && tag !== 'media' && typeof item.text === 'string') {
+        parts.push(item.text)
+      }
+    }
+    const line = parts.join('').trimEnd()
+    if (line.trim()) lines.push(line)
+  }
+  return lines.length ? lines.join('\n') : undefined
+}
+function unwrapFeishuContent(raw: string): string {
+  const trimmed = raw.trimStart()
+  if (!trimmed.startsWith('{')) return raw
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') {
+      if ('text' in parsed && typeof (parsed as { text?: unknown }).text === 'string') return (parsed as { text: string }).text
+      const post = extractFeishuPostText(parsed)
+      if (post !== undefined) return post
+    }
+  } catch { /* Not JSON; return raw text as-is. */ }
+  return raw
+}
 /** Converts a normalized Feishu event into a Trigger, returning undefined for messages sent by the bot itself. */
 export function feishuTrigger(input: unknown, botId: string, botAppId: string): Trigger | undefined {
   const event = EventSchema.parse(input)
@@ -38,7 +99,7 @@ export function feishuTrigger(input: unknown, botId: string, botAppId: string): 
   return { id: feishuTriggerId(event.message_id), source: SOURCE, threads: [{ source: SOURCE, id: thread }],
     actor: { source: SOURCE, id: event.sender_id }, human: event.sender_type === 'user',
     ...(direct ? { addressed: 'direct' as const } : mentioned ? { addressed: 'mention' as const } : {}),
-    at: feishuTime(event.create_time), text: withMentionNames(event.content, event.mentions),
+    at: feishuTime(event.create_time), text: withMentionNames(unwrapFeishuContent(event.content), event.mentions),
     channel: feishuChannel(event.chat_id, event.message_id, direct), ...(event.message_app_link ? { url: event.message_app_link } : {}),
     meta: { chatId: event.chat_id, messageId: event.message_id, direct, mentioned, ...(event.root_id ? { rootId: event.root_id } : {}),
       ...(event.parent_id ? { parentId: event.parent_id } : {}), ...(event.thread_id ? { threadId: event.thread_id } : {}) } }
@@ -69,7 +130,9 @@ export function historyText(message: HistoricalMessage): string {
   let content: unknown
   try { content = JSON.parse(message.body?.content ?? '') }
   catch { content = message.body?.content ?? '' /* Feishu also returns plain-text system messages. */ }
-  const plain = content && typeof content === 'object' && 'text' in content && typeof content.text === 'string' ? content.text : undefined
+  const plain = content && typeof content === 'object' && 'text' in content && typeof content.text === 'string'
+    ? content.text
+    : extractFeishuPostText(content)
   return withFeishuFiles(typeof content === 'string' ? content : plain ?? JSON.stringify(content), message.body?.content ?? '')
 }
 export function historyEvent(message: HistoricalMessage, chatId: string, direct: boolean): unknown {

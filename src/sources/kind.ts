@@ -52,7 +52,7 @@ export interface SourceChannel<C> {
    * Sends a message idempotently by ID; returns `'gone'` when the target conversation no longer accepts replies.
    * @throws when delivery failed but may succeed on a later retry.
    */
-  send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  send(host: Pick<SourceContext, 'commands'> & { onSent?: (messageId: string) => void }, message: OutboundMessage): Promise<'sent' | 'gone'>
   /** Returns the URL and label for `address`; `url` is empty when the Source is answered in the panel (`panel`) or `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
   /** Whether a person answers this kind's Threads in the panel, whose Thread page links to them. */

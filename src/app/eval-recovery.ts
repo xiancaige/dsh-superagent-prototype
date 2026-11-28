@@ -1,5 +1,5 @@
 /** Automatic recovery and IM timeout notifications for evaluations that timed out (`unavailable` with `timeout`). */
-import { followupOwners, type Decision, type Engine, type Outbox } from '../core/index.ts'
+import { followupOwners, key, type Decision, type Engine, type Outbox } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { evalTimeoutNotices } from './notices.ts'
 import type { Store } from './store.ts'
@@ -10,6 +10,8 @@ export const MAX_TIMEOUT_RECOVERIES = 3
 export const TIMEOUT_RECOVERY_WINDOW_MS = 24 * 60 * 60_000
 /** Minimum interval between timeout notices sent to the same thread during prolonged outages. */
 export const TIMEOUT_NOTICE_COOLDOWN_MS = 30 * 60_000
+/** How long an explicit Feishu evaluation may wait in queue before sending a lightweight queued notice. */
+export const EVAL_QUEUE_NOTICE_DELAY_MS = 25_000
 
 export type EvalRecoveryStore = Pick<Store, 'read' | 'decisions' | 'threads' | 'triggers' | 'tickets' | 'get' | 'set'>
 
@@ -91,4 +93,36 @@ export function notifyEvalTimeout(options: {
   store.set(KV.runtime.evalTimeoutNotice(decision.threadKey), new Date(now).toISOString())
   for (const message of notices) outbox.send(message)
   return true
+}
+
+/** Sends a lightweight one-time Feishu notice when an explicit evaluation has waited past `EVAL_QUEUE_NOTICE_DELAY_MS`. */
+export function notifySlowEvals(options: {
+  store: Pick<Store, 'threads' | 'triggers' | 'receipts'>
+  outbox: Pick<Outbox, 'send'>
+  paused: boolean
+  now?: number
+  delayMs?: number
+}): number {
+  if (options.paused) return 0
+  const { store, outbox } = options
+  const now = options.now ?? Date.now()
+  const delayMs = options.delayMs ?? EVAL_QUEUE_NOTICE_DELAY_MS
+  let sent = 0
+  for (const thread of store.threads.active()) {
+    const evalState = thread.evaluating
+    if (!evalState || evalState.strength !== 'explicit' || evalState.pausedAt) continue
+    const startedMs = Date.parse(evalState.startedAt)
+    if (!Number.isFinite(startedMs) || now - startedMs < delayMs) continue
+    const trigger = evalState.triggerIds.map(id => store.triggers.get(id)).find(item => item?.channel?.source === 'feishu')
+    if (!trigger?.channel) continue
+    const id = key('eval-queue', evalState.id, JSON.stringify(trigger.channel.address))
+    if (store.receipts.get(id)) continue
+    const chinese = /\p{Script=Han}/u.test(trigger.text) && !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(trigger.text)
+    const text = chinese
+      ? '已收到请求，主调度正在排队评估中，请稍候。'
+      : 'Request received; queued for orchestrator evaluation, please wait.'
+    outbox.send({ id, channel: trigger.channel, text, kind: 'notice' })
+    sent++
+  }
+  return sent
 }

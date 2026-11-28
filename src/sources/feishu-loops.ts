@@ -31,13 +31,26 @@ const bot = (ctx: SourceContext): FeishuBot => {
   return resolved
 }
 export async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
-  if (await ctx.command?.(trigger)) return
+  const parentId = typeof trigger.meta.parentId === 'string' && trigger.meta.parentId ? trigger.meta.parentId : undefined
+  const rootId = typeof trigger.meta.rootId === 'string' && trigger.meta.rootId ? trigger.meta.rootId : undefined
+  const mirror = rootId ? ctx.state.get(KV.feishu.mirrorRoot(rootId)) : undefined
+  const parentTicket = parentId
+    ? (ctx.state.get(KV.feishu.messageTicket(parentId))
+      ?? ctx.state.get(KV.feishu.topicRoot(parentId))?.ticketId
+      ?? ctx.state.get(KV.feishu.mirrorRoot(parentId))?.ticketId)
+    : undefined
+  const rootTicket = rootId
+    ? (ctx.state.get(KV.feishu.topicRoot(rootId))?.ticketId ?? mirror?.ticketId)
+    : undefined
+  const quotedTicket = parentTicket ?? rootTicket
+  const enriched: Trigger = quotedTicket && typeof trigger.meta.quotedTicket !== 'string'
+    ? { ...trigger, meta: { ...trigger.meta, quotedTicket } }
+    : trigger
+  if (await ctx.command?.(enriched)) return
   // A reply in the Feishu topic of a ticket that started on the local panel is a person's message on that ticket's own Thread,
   // as if typed in the panel; its Channel stays this Feishu message, so the answer goes back to the topic.
-  const rootId = typeof trigger.meta.rootId === 'string' ? trigger.meta.rootId : undefined
-  const mirror = rootId ? ctx.state.get(KV.feishu.mirrorRoot(rootId)) : undefined
-  if (mirror) { await ctx.receive({ ...trigger, threads: [mirror.thread] }); return }
-  await ctx.receive(trigger)
+  if (mirror) { await ctx.receive({ ...enriched, threads: [mirror.thread] }); return }
+  await ctx.receive(enriched)
   const chatId = String(trigger.meta.chatId ?? '')
   if (!chatId) return
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId

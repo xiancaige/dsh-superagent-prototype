@@ -4,6 +4,7 @@ import type { Commands } from '../infra/commands.ts'
 import { checkedImText, imSummary, imText } from '../infra/text.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { KV } from '../kv.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Mirror } from './mirror.ts'
@@ -13,7 +14,7 @@ import type { Store } from './store.ts'
 export const REPORT_DIRECTORY = join('.temp', 'superagent-reports')
 
 export interface OutboxHost {
-  readonly store: Pick<Store, 'atomic' | 'receipts'>
+  readonly store: Pick<Store, 'atomic' | 'receipts'> & Partial<Pick<Store, 'set'>>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
@@ -108,7 +109,10 @@ export class Outbox implements OutboxPort {
       }
     }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
-    const result = await sources.send(target, commands)
+    const onSent = target.channel.source === 'feishu' && receipt.ticketId
+      ? (messageId: string) => { store.set?.(KV.feishu.messageTicket(messageId), receipt.ticketId!) }
+      : undefined
+    const result = await sources.send(target, commands, onSent)
     if (result === 'waiting') throw new Later('The Source is not installed')
     store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
   }
