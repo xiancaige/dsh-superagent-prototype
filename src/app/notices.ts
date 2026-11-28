@@ -319,6 +319,48 @@ export function advanceBlockedNotices(ticket: Ticket, request: string, code: Adv
     channel, text, kind: 'notice', ticketId: ticket.id,
   }))
 }
+/** Reason reported by `finalize-ticket-worktree.mjs` when post-reclaim source checkout sync was skipped. */
+export interface SourceSyncSkipInfo {
+  readonly reason: string
+  readonly lockFile?: string
+}
+function formatSourceSyncSkipReason(info: SourceSyncSkipInfo, chinese: boolean): string {
+  if (info.reason === 'locked') {
+    const lockName = info.lockFile ? info.lockFile.replace(/^.*[\\/]/, '') : ''
+    if (chinese) return lockName ? `存在锁 ${lockName}（下次未上锁回收时会自动同步）` : '存在环境/编译锁（下次未上锁回收时会自动同步）'
+    return lockName ? `lock ${lockName} is held (will auto-sync next unlocked finalize)` : 'an environment/compile lock is held (will auto-sync next unlocked finalize)'
+  }
+  const cleaned = info.reason.replace(/\s+/g, ' ').trim()
+  if (/uncommitted change/i.test(cleaned)) {
+    return chinese ? '源工程存在未提交改动，已保留现状未覆盖' : 'source checkout has uncommitted changes (preserved untouched)'
+  }
+  if (/commit\(s\) ahead/i.test(cleaned)) {
+    return chinese ? '源工程存在未推送本地提交（已分叉），已保留现状' : 'source checkout has unpushed local commits (diverged; preserved untouched)'
+  }
+  if (/is on .*, not /i.test(cleaned)) {
+    return chinese ? '源工程当前不在主分支，已跳过自动同步' : 'source checkout is not on the main branch'
+  }
+  return imSummary(cleaned || (chinese ? '源工程同步失败' : 'source sync failed'), 30, '…')
+}
+/**
+ * Builds idempotent IM notices when a completed ticket's worktree was reclaimed but post-reclaim
+ * source checkout sync was safely skipped (e.g. `tp-environment.lock` / `TPCompileRestart.lock` held,
+ * or source checkout is dirty/diverged).
+ */
+export function sourceSyncSkippedNotices(ticket: Ticket, request: string, info: SourceSyncSkipInfo,
+  options: { endedAt?: string } = {}): OutboundMessage[] {
+  const chinese = chineseRequest(request, ticket.title)
+  const shortTitle = imSummary(ticket.title || ticket.id.slice(0, 8), 18, '…')
+  const detail = formatSourceSyncSkipReason(info, chinese)
+  const raw = chinese
+    ? `工单 ${ticket.id.slice(0, 8)}（${shortTitle}）已回收，但跳过源工程自动同步：${detail}。`
+    : `Ticket ${ticket.id.slice(0, 8)} (${shortTitle}) reclaimed, but source auto-sync was skipped: ${detail}.`
+  const text = imSummary(raw, IM_WORDS - 5, '…')
+  return ticket.channels.filter(channel => channel.source !== 'github').map(channel => ({
+    id: key('source-sync-skipped', ticket.id, options.endedAt ?? '', info.reason, info.lockFile ?? '', channel.source, JSON.stringify(channel.address)),
+    channel, text, kind: 'notice', ticketId: ticket.id,
+  }))
+}
 /**
  * Builds idempotent IM notices when an explicit human request times out in Eval (`unavailable` with `timeout`),
  * so Feishu/local operators are not left with silent drops during upstream model outages.

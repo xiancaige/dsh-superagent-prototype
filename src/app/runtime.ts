@@ -34,7 +34,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { advanceBlockedNotices, consecutiveModelFailures, environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, ticketFailedNotices } from './notices.ts'
+import { advanceBlockedNotices, consecutiveModelFailures, environmentLockNotices, eventNotice, followupNotice, isEnvironmentLockSummary, resultRelay, sourceSyncSkippedNotices, ticketFailedNotices, type SourceSyncSkipInfo } from './notices.ts'
 import { hasPendingMasterWork, notifyEvalTimeout, notifySlowEvals, recoverTimedOutEvals } from './eval-recovery.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -365,12 +365,20 @@ export class Runtime extends Service implements SourceHost {
         for (const message of messages) outbox.send(message)
         return messages.length > 0
       }
+      const notifySourceSyncSkipped = (completed: Ticket, info: SourceSyncSkipInfo, endedAt: string): boolean => {
+        if (!setup.configured()) return false
+        const request = store.triggers.get(completed.origin.triggerId)?.text ?? completed.title
+        const messages = sourceSyncSkippedNotices(completed, request, info, { endedAt })
+        for (const message of messages) outbox.send(message)
+        return messages.length > 0
+      }
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         analysisProjectRoot: () => setup.deployment.sourceRoot || (setup.deployment.environment?.projectFile ? dirname(setup.deployment.environment.projectFile) : undefined),
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger),
         notifyTicketFailure,
         notifyAdvanceBlocked,
+        notifySourceSyncSkipped,
         unansweredTriggers: failed => unansweredHumanTriggers(failed, store.triggers) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),

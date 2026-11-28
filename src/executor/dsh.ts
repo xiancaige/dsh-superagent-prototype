@@ -18,7 +18,7 @@ import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { unregisterMissingWorkspace } from './workspace-cleanup.ts'
-import { resultRelay } from '../app/notices.ts'
+import { resultRelay, type SourceSyncSkipInfo } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, hasBackgroundWork, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
@@ -110,6 +110,8 @@ export interface ExecutorHost {
   notifyTicketFailure?(ticket: Ticket, summary: string, options?: { assignmentId?: string; restarted?: boolean }): boolean
   /** Sends an idempotent IM notice when a worker turn ends while automatic ticket advancement is prohibited. */
   notifyAdvanceBlocked?(ticket: Ticket, code: AdvanceBlockCode): boolean
+  /** Sends an idempotent IM notice when post-reclaim source checkout sync was skipped (locked or dirty/diverged). */
+  notifySourceSyncSkipped?(ticket: Ticket, info: SourceSyncSkipInfo, endedAt: string): boolean
   /** Returns unanswered human follow-up triggers to surface in failed/blocked worker_report relays. */
   unansweredTriggers?(ticket: Ticket): { trigger_id: string; preview: string }[]
 }
@@ -306,6 +308,26 @@ function latestTurnText(agent: Agent): string {
     ? last.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n').trim() : ''
 }
 
+/** Extracts skipped `sourceSync` info from `finalize-ticket-worktree.mjs` JSON stdout, if present. */
+export function parseSourceSyncSkipped(stdout: string): SourceSyncSkipInfo | undefined {
+  const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
+    if (!line.startsWith('{') || !line.endsWith('}')) continue
+    try {
+      const parsed = JSON.parse(line) as { sourceSync?: { synced?: unknown; skipped?: unknown; reason?: unknown; lockFile?: unknown } }
+      const sync = parsed?.sourceSync
+      if (sync && sync.synced === false && sync.skipped === true) {
+        const reason = typeof sync.reason === 'string' && sync.reason.trim() ? sync.reason.trim() : 'unknown'
+        const lockFile = typeof sync.lockFile === 'string' && sync.lockFile.trim() ? sync.lockFile.trim() : undefined
+        return lockFile ? { reason, lockFile } : { reason }
+      }
+      return undefined
+    } catch { /* Ignore non-JSON trailing lines. */ }
+  }
+  return undefined
+}
+
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
@@ -354,9 +376,11 @@ export class DshExecutor implements Executor {
       // Tickets.wake retains human inputs while leased; launch/delivery also wait on the durable effect.
       this.finalizing.add(ticketId)
       try {
-        await runAsWorker(host.context.subprocess,
+        const stdout = await runAsWorker(host.context.subprocess,
           process.platform === 'win32' ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command] : ['sh', '-c', command],
           dirname(directory), AbortSignal.any([host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)]), env)
+        const skipped = parseSourceSyncSkipped(stdout)
+        if (skipped) host.notifySourceSyncSkipped?.(ticket, skipped, endedAt)
         // Keep this in the durable effect: failed registry writes retry after an idempotent finalizer.
         await unregisterMissingWorkspace(host.context.workspaceRegistry, host.store.tickets, ticket,
           host.analysisProjectRoot?.() ?? host.machine.sourceRoot)
