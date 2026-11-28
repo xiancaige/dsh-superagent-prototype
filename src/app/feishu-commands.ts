@@ -184,6 +184,8 @@ export function buildTicketDetailCard(ticket: Ticket, request?: string): object 
 }
 
 const receipts = family<{ text: string }>('feishu-command:')
+/** Maximum age for a natural-language status/progress query to hit the fast-path; older backfilled messages must not be re-answered. */
+export const FAST_STATUS_MAX_AGE_MS = 5 * 60_000
 const STATUS_PROBE_RE = /^(?:(?:看下?|查下?|查一下|查询|看看|当前|现在|目前)?(?:进度|状态|工单进度|工单状态|任务进度|任务状态|进展|情况)(?:如何|怎么样|怎样|咋样|了)?|结束(?:成功)?了吗|完成了吗|搞定了吗|好了吗|跑完了吗|status|progress)$/i
 const STATUS_PREFIX_TARGET_RE = /^(?:(?:看下?|查下?|查一下|查询|看看)?(?:进度|状态|工单进度|工单状态|进展|status|progress))\s+([0-9a-f]{6,64})$/i
 const STATUS_SUFFIX_TARGET_RE = /^([0-9a-f]{6,64})\s+(?:(?:的)?(?:进度|状态|进展|情况)(?:如何|怎么样|怎样|咋样|了)?|结束(?:成功)?了吗|完成了吗|搞定了吗|好了吗|跑完了吗|status|progress)$/i
@@ -359,6 +361,10 @@ export class FeishuCommands {
       const { store, sources, outbox } = this.host
       if (!trigger.human || !allowedSender(store.settings(), trigger.actor) || !trigger.addressed || !sources.scope(trigger).listened) return false
       if (!trigger.channel) return false
+      // Never re-answer historical status queries replayed by backfill/polling after a restart.
+      if (store.triggers.get(trigger.id)) return false
+      const triggerAtMs = Date.parse(trigger.at)
+      if (Number.isFinite(triggerAtMs) && Date.now() - triggerAtMs > FAST_STATUS_MAX_AGE_MS) return false
       const receipt = receipts(trigger.id)
       if (store.get(receipt)?.text === undefined) {
         let response: string

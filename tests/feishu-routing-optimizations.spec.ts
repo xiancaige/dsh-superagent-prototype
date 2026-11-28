@@ -100,14 +100,15 @@ describe('Item 4: deterministic Feishu fast-path for status queries and slow-eva
     expect(parseFastStatusQuery('继续开单修复')).toBeUndefined()
   })
 
-  it('answers Feishu status queries deterministically via fast-path without entering Eval', async () => {
+  it('answers fresh Feishu status queries deterministically via fast-path and ignores historical/backfilled status messages', async () => {
     h = await startRuntime()
     const { ticket } = await h.acceptedTicket(feishu('20', '@bot 编译验证'))
     await h.runtime.sendReplies()
     vi.mocked(Commands.prototype.lark).mockClear()
 
     const ctx = sourceContext(h.runtime, feishuKind)
-    const probe = feishu('21', '@bot 进度', { root_id: 'om_20' })
+    const nowIso = new Date().toISOString()
+    const probe = { ...feishu('21', '@bot 进度', { root_id: 'om_20' }), at: nowIso }
     await receive(ctx, probe)
     await h.runtime.sendReplies()
 
@@ -117,6 +118,14 @@ describe('Item 4: deterministic Feishu fast-path for status queries and slow-eva
     expect(replyArgs).toBeDefined()
     const markdown = replyArgs![replyArgs!.indexOf('--markdown') + 1]
     expect(markdown).toContain(ticket.id.slice(0, 8))
+
+    // A historical status message (>5m old, e.g. from backfillChat after restart) MUST NOT trigger a fast-path reply!
+    vi.mocked(Commands.prototype.lark).mockClear()
+    const oldProbe = { ...feishu('22', '@bot 进度', { root_id: 'om_20' }), at: '2026-09-09T00:00:22.000Z' }
+    h.runtime.store.triggers.save(oldProbe)
+    await receive(ctx, oldProbe)
+    await h.runtime.sendReplies()
+    expect(vi.mocked(Commands.prototype.lark)).not.toHaveBeenCalled()
   })
 
   it('sends a single lightweight Feishu queued notice when an explicit evaluation waits past threshold', async () => {
