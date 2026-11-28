@@ -61,6 +61,9 @@ export const KV = {
     /** A ticket that started outside Feishu, mirrored into a Feishu topic: the topic's root message, by ticket and by message. */
     mirror: family<FeishuMirror, [ticket: string]>('feishu-mirror:'),
     mirrorRoot: family<FeishuMirror, [message: string]>('feishu-mirror-root:'),
+    /** Per-ticket dedicated Feishu topic binding (1-to-1 between ticket and topic root message) to prevent cross-topic replies. */
+    topic: family<FeishuTopic, [ticket: string]>('feishu-topic:'),
+    topicRoot: family<FeishuTopic, [message: string]>('feishu-topic-root:'),
     /** Per-ticket state for periodic long-task progress sync messages sent to Feishu. */
     progressSync: family<FeishuProgressSyncState, [ticket: string]>('feishu-progress-sync:') },
   /**
@@ -73,5 +76,7 @@ export const KV = {
 }
 /** Where a ticket's Feishu topic is: its root message, and the ticket's own Thread that replies in the topic are rewritten to. */
 export interface FeishuMirror { ticketId: string; chatId: string; messageId: string; direct: boolean; thread: { source: string; id: string } }
+/** Dedicated Feishu topic bound 1-to-1 to a ticket: all outbound Feishu replies for `ticketId` stay inside `messageId`'s topic. */
+export interface FeishuTopic { ticketId: string; chatId: string; messageId: string; direct: boolean }
 /** Per-ticket state for periodic Feishu intermediate progress synchronization. */
 export interface FeishuProgressSyncState { assignmentId: string; lastSentAt: number; syncCount: number; lastReceiptIds?: string[] }

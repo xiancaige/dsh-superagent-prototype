@@ -371,8 +371,9 @@ export class Runtime extends Service implements SourceHost {
           store.tickets.save(ticket)
         })
       })
-      // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat (see `Mirror`).
-      const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu })
+      // Tickets that started on the local panel are mirrored into the operator's Feishu direct chat, and Feishu tickets get 1-to-1 topic binding (see `Mirror`).
+      const mirror = new Mirror({ store, sources, commands, ready: () => setup.configured() && !!setup.deployment.feishu,
+        brand: () => setup.deployment.feishu?.brand ?? 'feishu' })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, mirror, paused: () => this.paused() })
       this.progressSync = new FeishuProgressSync({ context: ctx, store, sources, outbox, mirror,
         configured: () => setup.configured(), paused: () => this.paused(), closing: () => this.closing() })

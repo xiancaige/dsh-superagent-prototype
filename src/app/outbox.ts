@@ -17,8 +17,8 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
-  /** Copies the replies of tickets that started on the local panel into Feishu; without it nothing is mirrored. */
-  readonly mirror?: Pick<Mirror, 'eligible' | 'channel'>
+  /** Copies the replies of tickets that started on the local panel into Feishu and binds per-ticket Feishu topics. */
+  readonly mirror?: Pick<Mirror, 'eligible' | 'channel' | 'topic'>
   paused(): boolean
 }
 
@@ -97,7 +97,16 @@ export class Outbox implements OutboxPort {
       if (channel === 'waiting') throw new Later('The Feishu bot is not ready')
       if (channel === 'none') { store.receipts.settle(receipt, 'channelGone'); return }
       target = { ...receipt, channel }
-    } else if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+    } else {
+      if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+      // Enforce 1-to-1 Feishu topic binding per ticket: auto-create and bind a dedicated topic when none exists or the target belongs to another ticket.
+      if (receipt.channel.source === 'feishu' && receipt.ticketId && mirror) {
+        const channel = await mirror.topic(receipt.ticketId, receipt.channel)
+        if (channel === 'waiting') throw new Later('The Feishu bot is not ready')
+        if (channel === 'none') { store.receipts.settle(receipt, 'channelGone'); return }
+        target = { ...receipt, channel }
+      }
+    }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(target, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')

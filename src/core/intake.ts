@@ -46,6 +46,25 @@ export class Intake extends EnginePart {
     // already delivered.
     const quoted = trigger.source === 'wecom' && typeof trigger.meta.quotedTicket === 'string' ? trigger.meta.quotedTicket : ''
     const addressed = (ticketId: string): boolean => trigger.source !== 'wecom' || (!!quoted && ticketId.toLowerCase().startsWith(quoted))
+    const target = explicitTicketTarget(trigger, this.repo.tickets.list())
+    const feishuChatId = trigger.source === 'feishu' && typeof trigger.meta.chatId === 'string' ? trigger.meta.chatId : ''
+    const feishuRootId = trigger.source === 'feishu'
+      ? (typeof trigger.meta.rootId === 'string' && trigger.meta.rootId ? trigger.meta.rootId : String(trigger.meta.messageId ?? ''))
+      : ''
+    // Once a ticket that originated in another ticket's Feishu topic has moved to its own dedicated Feishu topic,
+    // unaddressed messages in the colliding origin topic must not cross-talk into it (explicitly attached threads stay active).
+    const movedToOwnFeishuTopic = (ticket: Ticket, currentThreadKey: string, subscriptions: readonly string[]): boolean => {
+      if (!feishuChatId || !feishuRootId || target === ticket.id) return false
+      if (!subscriptions.length || subscriptions[0] === ticket.id) return false
+      const origin = this.repo.triggers.get(ticket.origin.triggerId)
+      if (!origin?.threads.some(ref => threadKey(ref) === currentThreadKey)) return false
+      return ticket.channels.some(channel => {
+        if (channel.source !== 'feishu' || channel.address.chatId !== feishuChatId) return false
+        const dedicatedRoot = channel.address.messageId
+        if (!dedicatedRoot || dedicatedRoot === feishuRootId) return false
+        return !!this.repo.threads.get(threadKey({ source: 'feishu', id: `${feishuChatId}:${dedicatedRoot}` }))?.subscriptions.includes(ticket.id)
+      })
+    }
     for (const ref of trigger.threads) {
       const thread = this.thread(ref)
       if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
@@ -58,13 +77,13 @@ export class Intake extends EnginePart {
         const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
         if (!ticket || (!liveTicket(ticket) && !resumes)) continue
         if (!addressed(ticketId)) continue
+        if (movedToOwnFeishuTopic(ticket, thread.key, thread.subscriptions)) continue
         reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
       }
       this.repo.threads.save(thread)
     }
     // Shared thread membership is context, not authority to restart ended work. Even a
     // one-word probe formerly resumed every completed ticket subscribed to this chat.
-    const target = explicitTicketTarget(trigger, this.repo.tickets.list())
     for (const [id, item] of reached) if (!liveTicket(item.ticket) && id !== target) reached.delete(id)
     for (const [ticketId, { ticket, context: followed }] of reached) {
       this.tickets.addInput(ticket, { id: key('input', ticketId, 'trigger', trigger.id), kind: 'trigger', triggerId: trigger.id, at,

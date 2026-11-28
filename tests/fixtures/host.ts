@@ -137,7 +137,15 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
   vi.spyOn(Commands.prototype, 'gh').mockImplementation(async args => args[1] === 'user' ? { login: 'agent-bot' } : repository)
-  vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ users: [{ member_id: MEMBER, name: 'Alice' }], has_more: false })
+  let sentTopicSeq = 0
+  vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+    if (args.includes('+messages-send')) {
+      const chatIndex = args.indexOf('--chat-id')
+      const chatId = chatIndex >= 0 && args[chatIndex + 1] ? args[chatIndex + 1]! : CHAT
+      return { message_id: `om_topic_${++sentTopicSeq}`, chat_id: chatId }
+    }
+    return { users: [{ member_id: MEMBER, name: 'Alice' }], has_more: false }
+  })
   vi.spyOn(Commands.prototype, 'git').mockResolvedValue('')
   vi.spyOn(Commands.prototype, 'run').mockResolvedValue('{"ok":true,"data":{}}')
   const scoped = 'git config -z --show-scope --get-regexp ^(credential\\..*|http\\..*extraheader)$'
